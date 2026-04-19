@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-moneylover": {
+      "command": "node",
+      "args": ["/absolute/path/to/moneylover-mcp/src/server.js"],
+      "env": {
+        "EMAIL": "your@email.com",
+        "PASSWORD": "your-password"
+      }
+    }
+  }
+}

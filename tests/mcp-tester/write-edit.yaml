@@ -1,0 +1,51 @@
+---
+name: edit_wallet
+description: Agent should find MCP-Test-Wallet via get_wallets and rename it using edit_wallet.
+input: "Find the Money Lover wallet named 'MCP-Test-Wallet' using get_wallets to get its ID, then rename it to 'MCP-Test-Wallet-Edited' using edit_wallet with currency ID 1 (USD)."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_wallets
+        args: !any
+        status: success
+        content: !any
+      - name: edit_wallet
+        args: !any
+        status: success
+        content: !any
+
+---
+name: edit_category
+description: Agent should find MCP-Test-Category via get_categories and rename it using edit_category.
+input: "Find the Money Lover category named 'MCP-Test-Category' in wallet 590f65bec16649948da1f4cfb94870c6 using get_categories to get its ID, then rename it to 'MCP-Test-Category-Edited' using edit_category with icon 'icon_3'."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_categories
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+      - name: edit_category
+        args: !any
+        status: success
+        content: !any
+
+---
+name: edit_transaction
+description: Agent should find the MCP test transaction via get_transactions then edit it with a new note.
+input: "In Money Lover wallet 590f65bec16649948da1f4cfb94870c6, use get_transactions with startDate and endDate both 2026-04-18 to find the transaction with note 'MCP test transaction'. Then call edit_transaction with its ID, keeping walletId, the category's global _id as categoryId, the same amount and date, but changing the note to 'MCP test transaction - edited'."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_transactions
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+          startDate: "2026-04-18"
+          endDate: "2026-04-18"
+        status: success
+        content: !any
+      - name: edit_transaction
+        args: !any
+        status: success
+        content: !any

@@ -1,0 +1,73 @@
+---
+name: all_categories
+description: Agent should call get_all_categories when no wallet is specified.
+input: Give me every category across all of my wallets in Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_all_categories
+        args: !any
+        status: success
+        content: !any
+
+---
+name: search_transactions
+description: Agent should call search_transactions when a free-form query is described.
+input: "Search my Money Lover transactions for wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: search_transactions
+        args: !any
+        status: success
+        content: !any
+
+---
+name: transaction_search_config
+description: Agent should call get_transaction_search_config for saved labels/with parties.
+input: Fetch the configuration used for searching transactions in Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_transaction_search_config
+        args: !any
+        status: success
+        content: !any
+
+---
+name: related_transactions_by_id
+description: Agent should call get_related_transactions with the id list.
+input: "Find transactions related to id bfa8b03330b24579849acdf50db11304."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_related_transactions
+        args:
+          ids:
+            - "bfa8b03330b24579849acdf50db11304"
+        status: success
+        content: !any
+
+---
+name: currencies_catalogue
+description: Agent should call get_currencies for currency metadata.
+input: List the currencies supported by Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_currencies
+        args: !any
+        status: success
+        content: !any
+
+---
+name: events_for_wallet
+description: Agent should call get_events for Money Lover events/savings.
+input: "Show all saving goals and events attached to wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_events
+        args: !any
+        status: success
+        content: !any

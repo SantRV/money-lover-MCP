@@ -1,0 +1,51 @@
+---
+name: delete_wallet
+description: Agent should find MCP-Test-Wallet-Edited via get_wallets and permanently delete it.
+input: "Find the Money Lover wallet named 'MCP-Test-Wallet-Edited' using get_wallets to get its ID, then permanently delete it using delete_wallet."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_wallets
+        args: !any
+        status: success
+        content: !any
+      - name: delete_wallet
+        args: !any
+        status: success
+        content: !any
+
+---
+name: delete_category
+description: Agent should find MCP-Test-Category-Edited via get_categories and permanently delete it.
+input: "Find the Money Lover category named 'MCP-Test-Category-Edited' in wallet 590f65bec16649948da1f4cfb94870c6 using get_categories to get its ID, then permanently delete it using delete_category."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_categories
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+      - name: delete_category
+        args: !any
+        status: success
+        content: !any
+
+---
+name: delete_transaction
+description: Agent should find the edited MCP test transaction via get_transactions and delete it.
+input: "In Money Lover wallet 590f65bec16649948da1f4cfb94870c6, use get_transactions with startDate and endDate both 2026-04-18 to find the transaction with note 'MCP test transaction - edited'. Then permanently delete it using delete_transaction with its ID."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_transactions
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+          startDate: "2026-04-18"
+          endDate: "2026-04-18"
+        status: success
+        content: !any
+      - name: delete_transaction
+        args: !any
+        status: success
+        content: !any

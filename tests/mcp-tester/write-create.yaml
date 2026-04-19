@@ -1,0 +1,35 @@
+---
+name: add_wallet
+description: Agent should call add_wallet to create a test wallet named MCP-Test-Wallet.
+input: "Create a new Money Lover wallet named 'MCP-Test-Wallet' with currency ID 1 (USD)."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: add_wallet
+        args: !any
+        status: success
+        content: !any
+
+---
+name: add_category
+description: Agent should call add_category to create a test category in the main wallet.
+input: "In Money Lover wallet 590f65bec16649948da1f4cfb94870c6, create a new income category named 'MCP-Test-Category' using icon 'icon_3' with type 2 (income)."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: add_category
+        args: !any
+        status: success
+        content: !any
+
+---
+name: add_transaction
+description: Agent should call add_transaction to create a test transaction.
+input: "In Money Lover wallet 590f65bec16649948da1f4cfb94870c6, add a transaction with category ID 225c6924c4f143909851daeb75627928, amount '1000', date 2026-04-18, and note 'MCP test transaction'."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: add_transaction
+        args: !any
+        status: success
+        content: !any

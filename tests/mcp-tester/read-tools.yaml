@@ -1,0 +1,310 @@
+---
+name: list_wallets
+description: Agent should call get_wallets when asked about all wallets.
+input: Show me all my Money Lover wallets.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_wallets
+        args: !any
+        status: success
+        content: !any
+
+---
+name: wallet_balance
+description: Agent should call get_wallet_balance with the wallet id.
+input: "What is the current balance of wallet 590f65bec16649948da1f4cfb94870c6?"
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_wallet_balance
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+
+---
+name: shared_wallets
+description: Agent should call get_shared_wallets when asked about shared wallets.
+input: List the wallets I'm sharing with other Money Lover users.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_shared_wallets
+        args: !any
+        status: success
+        content: !any
+
+---
+name: awaiting_shared_wallets
+description: Agent should call get_awaiting_shared_wallets for pending invitations.
+input: Show me any pending wallet share invitations that I still need to accept.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_awaiting_shared_wallets
+        args: !any
+        status: success
+        content: !any
+
+---
+name: user_info
+description: Agent should call get_user_info for profile summary.
+input: Show me my Money Lover account information.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_user_info
+        args: !any
+        status: success
+        content: !any
+
+---
+name: user_account_devices
+description: Agent should call get_user_account when asked about devices/sessions.
+input: List every device or session currently logged into my Money Lover account.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_user_account
+        args: !any
+        status: success
+        content: !any
+
+---
+name: user_profile
+description: Agent should call get_user_profile for extended profile info.
+input: Fetch my extended Money Lover user profile.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_user_profile
+        args: !any
+        status: !any
+        content: !any
+
+---
+name: categories_for_wallet
+description: Agent should call get_categories with the given wallet id.
+input: "List the categories available in wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_categories
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+
+---
+name: all_categories
+description: Agent should call get_all_categories when no wallet is specified.
+input: Give me every category across all of my wallets in Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_all_categories
+        args: !any
+        status: success
+        content: !any
+
+---
+name: transactions_in_range
+description: Agent should call get_transactions with walletId plus date range.
+input: "List transactions for wallet 590f65bec16649948da1f4cfb94870c6 between 2026-04-01 and 2026-04-18."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_transactions
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+          startDate: "2026-04-01"
+          endDate: "2026-04-18"
+        status: success
+        content: !any
+
+---
+name: transaction_search_config
+description: Agent should call get_transaction_search_config for saved labels/with parties.
+input: Fetch the configuration used for searching transactions in Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_transaction_search_config
+        args: !any
+        status: success
+        content: !any
+
+---
+name: search_transactions
+description: Agent should call search_transactions when a free-form query is described.
+input: "Search my Money Lover transactions for wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: search_transactions
+        args: !any
+        status: success
+        content: !any
+
+---
+name: debt_transactions
+description: Agent should call get_debt_transactions for loan/debt movements.
+input: Show all the transactions that Money Lover has flagged as debts or loans.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_debt_transactions
+        args: !any
+        status: success
+        content: !any
+
+---
+name: related_transactions_by_id
+description: Agent should call get_related_transactions with the id list.
+input: "Find transactions related to id bfa8b03330b24579849acdf50db11304."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_related_transactions
+        args:
+          ids:
+            - "bfa8b03330b24579849acdf50db11304"
+        status: success
+        content: !any
+
+---
+name: related_transactions_by_category
+description: Agent should call get_related_transactions_by_category with the category id.
+input: "Show transactions related to category 9c0aee5796c345d087c91c0ed5bcc689."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_related_transactions_by_category
+        args:
+          categoryId: "9c0aee5796c345d087c91c0ed5bcc689"
+        status: success
+        content: !any
+
+---
+name: related_transactions_by_wallet
+description: Agent should call get_related_transactions_by_wallet with the wallet id.
+input: "Show transactions related to wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_related_transactions_by_wallet
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+
+---
+name: budgets_for_wallet
+description: Agent should call get_budgets with the wallet id.
+input: "List the budgets for wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_budgets
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+
+---
+name: all_budgets
+description: Agent should call get_all_budgets for a full cross-wallet list.
+input: Give me all the budgets I have across every wallet.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_all_budgets
+        args: !any
+        status: success
+        content: !any
+
+---
+name: events_for_wallet
+description: Agent should call get_events for Money Lover events/savings.
+input: "Show all saving goals and events attached to wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_events
+        args: !any
+        status: success
+        content: !any
+
+---
+name: debts_for_wallet
+description: Agent should call get_debts for debts/loans in a wallet.
+input: "List the open debts tracked in wallet 590f65bec16649948da1f4cfb94870c6."
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_debts
+        args:
+          walletId: "590f65bec16649948da1f4cfb94870c6"
+        status: success
+        content: !any
+
+---
+name: icons_default_pack
+description: Agent should call get_icons for the default icon set.
+input: Fetch the default Money Lover icon pack.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_icons
+        args: !any
+        status: success
+        content: !any
+
+---
+name: linked_providers
+description: Agent should call get_linked_providers for supported banks.
+input: Which financial institutions can I link as providers in Money Lover?
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_linked_providers
+        args: !any
+        status: success
+        content: !any
+
+---
+name: currencies_catalogue
+description: Agent should call get_currencies for currency metadata.
+input: List the currencies supported by Money Lover.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_currencies
+        args: !any
+        status: success
+        content: !any
+
+---
+name: exchange_rates
+description: Agent should call get_exchange_rates for USD-based rates.
+input: Fetch the latest USD-based exchange rates that Money Lover uses.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_exchange_rates
+        args: !any
+        status: success
+        content: !any
+
+---
+name: other_config
+description: Agent should call get_other_config for the misc config blob.
+input: Retrieve the miscellaneous Money Lover runtime configuration payload.
+tool_assertions:
+  - kind: tools_called
+    tool_calls:
+      - name: get_other_config
+        args: !any
+        status: success
+        content: !any
