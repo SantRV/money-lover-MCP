@@ -130,6 +130,14 @@ export const calendarDate = (input, options = {}) => {
   throw new Error('date must be in YYYY-MM-DD format');
 };
 
+/** Add calendar days to a YYYY-MM-DD date without converting through local midnight. */
+export const addCalendarDays = (input, days) => {
+  const iso = calendarDate(input);
+  const [year, month, day] = iso.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return formatParts(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, shifted.getUTCDate());
+};
+
 export const safeCalendarDate = (input, options) => {
   try {
     return calendarDate(input, options);

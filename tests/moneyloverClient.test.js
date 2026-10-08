@@ -376,45 +376,71 @@ describe('MoneyloverClient', () => {
       expect(global.fetch).toHaveBeenCalledTimes(2);
     });
 
-    it('editTransaction sends full payload with resolved category to /transaction/edit', async () => {
+    it('editTransaction loads the row and writes the fields the web app keeps', async () => {
       global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'cat-g1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
-      );
-      global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'cat-g1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+        ok({
+          transactions: [
+            {
+              _id: 'txn1',
+              account: { _id: 'w1' },
+              category: { _id: 'cat-g1', type: 2, name: 'Food' },
+              amount: '10',
+              note: 'old',
+              displayDate: '2026-04-18T00:00:00.000Z',
+              with: ['sam'],
+              exclude_report: true,
+              event: { _id: 'event-1' },
+              images: ['pic.jpg'],
+              remind: 1710000000,
+              longtitude: '138.6',
+              latitude: '-34.9',
+              addressName: 'Adelaide',
+              parent: { _id: 'debt-1' }
+            }
+          ]
+        })
       );
       global.fetch.mockResolvedValueOnce(ok({ _id: 'txn1' }));
 
       const data = await new MoneyloverClient('t').editTransaction('txn1', {
         walletId: 'w1',
-        categoryId: 'cat-g1',
+        currentDate: '2026-04-18',
         amount: '999',
-        date: '2026-04-18',
-        note: 'updated',
-        with: []
+        note: 'updated'
       });
       expect(data).toEqual({ _id: 'txn1' });
-      expect(global.fetch).toHaveBeenCalledTimes(3);
-      const body = JSON.parse(global.fetch.mock.calls[2][1].body);
-      expect(body._id).toBe('txn1');
-      expect(body.account).toBe('w1');
-      expect(body.category).toBe('cat-g1');
-      expect(body.amount).toBe('999');
-      expect(body.note).toBe('updated');
-      expect(body.with).toEqual([]);
+      const editCall = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/edit'));
+      const body = JSON.parse(editCall[1].body);
+      expect(body).toMatchObject({
+        _id: 'txn1',
+        account: 'w1',
+        category: 'cat-g1',
+        amount: '999',
+        note: 'updated',
+        displayDate: '2026-04-18',
+        with: ['sam'],
+        exclude_report: true,
+        event: 'event-1',
+        image: 'pic.jpg',
+        remind: 1710000000,
+        longtitude: '138.6',
+        latitude: '-34.9',
+        addressName: 'Adelaide',
+        parent: 'debt-1'
+      });
     });
 
-    it('editTransaction rejects a missing note before calling the API', async () => {
+    it('editTransaction refuses to write when the existing row cannot be loaded', async () => {
+      global.fetch.mockResolvedValueOnce(ok({ transactions: [] }));
+      global.fetch.mockResolvedValueOnce(ok([]));
       await expect(
         new MoneyloverClient('t').editTransaction('txn1', {
           walletId: 'w1',
-          categoryId: 'cat-g1',
-          amount: '999',
-          date: '2026-04-18',
-          with: []
+          currentDate: '2026-04-18',
+          note: 'updated'
         })
-      ).rejects.toThrow(/note/);
-      expect(global.fetch).not.toHaveBeenCalled();
+      ).rejects.toThrow(/Could not load transaction/);
+      expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/edit'))).toBe(false);
     });
 
     it('treats HTTP 401 as an authentication error and does not echo the body token', async () => {
@@ -446,13 +472,32 @@ describe('MoneyloverClient', () => {
       expect(body.icon).toBe('icon_7');
     });
 
-    it('editWallet sends _id, currency_id (required), and optional fields to /wallet/edit', async () => {
+    it('editWallet keeps credit, exclude-from-total, and archived flags', async () => {
+      global.fetch.mockResolvedValueOnce(
+        ok([
+          {
+            _id: 'w1',
+            name: 'Card',
+            icon: 'icon_9',
+            currency_id: 20,
+            account_type: 4,
+            exclude_total: true,
+            archived: false
+          }
+        ])
+      );
       global.fetch.mockResolvedValueOnce(ok({}));
-      await new MoneyloverClient('t').editWallet('w1', { name: 'NewName', currencyId: 30 });
-      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
-      expect(body._id).toBe('w1');
-      expect(body.currency_id).toBe(30);
-      expect(body.name).toBe('NewName');
+      await new MoneyloverClient('t').editWallet('w1', { name: 'NewName' });
+      const editCall = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/wallet/edit'));
+      expect(JSON.parse(editCall[1].body)).toEqual({
+        _id: 'w1',
+        name: 'NewName',
+        icon: 'icon_9',
+        currency_id: 20,
+        account_type: 4,
+        exclude_total: true,
+        archived: false
+      });
     });
 
     it('deleteWallet sends _id to /wallet/delete', async () => {

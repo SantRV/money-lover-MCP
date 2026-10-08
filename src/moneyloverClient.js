@@ -1,15 +1,24 @@
-import { prepareAmount, amountCents } from './amounts.js';
+import { prepareAmount, amountCents, formatAmount, parseAmount } from './amounts.js';
 import {
   CategoryType,
   coerceCategoryType,
   matchGlobalCategory,
   selectCategory,
   summarizeCategory,
+  systemCategoryLabel,
   unwrapList
 } from './categories.js';
-import { calendarDate, safeCalendarDate } from './dates.js';
+import { addCalendarDays, calendarDate, safeCalendarDate } from './dates.js';
 import { clip, redact } from './redact.js';
-import { isAuthError } from './authError.js';
+import { apiErrorCode, deviceErrorMessage, isAuthError, isDeviceError, NOT_AUTHORIZED_CODE } from './authError.js';
+import { readBalance, roundMoney, signedTransactionDelta } from './balance.js';
+import {
+  cloudflareWriteMessage,
+  looksLikeCloudflare,
+  looksLikeReadOnly,
+  readOnlyWriteMessage,
+  userCategoryV2Message
+} from './writeErrors.js';
 
 const BASE_URL = 'https://web.moneylover.me/api';
 const LOGIN_URL = `${BASE_URL}/user/login-url`;
@@ -45,18 +54,33 @@ const readJson = async (response) => {
 };
 
 const parseApiPayload = (payload) => {
-  const errorCode = payload?.error ?? payload?.e ?? 0;
-  const numeric = typeof errorCode === 'string' && errorCode.trim() !== '' ? Number(errorCode) : errorCode;
-  const failed = numeric !== 0 && numeric !== '0' && Boolean(errorCode);
-  if (failed) {
-    const message = payload?.msg || payload?.message || 'Money Lover API error';
-    throw new MoneyloverApiError(String(message), {
-      code: Number.isFinite(numeric) ? numeric : errorCode,
+  const code = apiErrorCode(payload);
+  if (code) {
+    const device = deviceErrorMessage(code);
+    const rawMessage =
+      payload?.msg ||
+      payload?.message ||
+      (code === NOT_AUTHORIZED_CODE ? 'Not authorized error' : 'Money Lover API error');
+    const readOnly = looksLikeReadOnly(rawMessage);
+    throw new MoneyloverApiError(device || (readOnly ? readOnlyWriteMessage() : String(rawMessage)), {
+      code: device ? code : readOnly ? 'READ_ONLY' : code,
       detail: redact(payload)
     });
   }
   return payload?.data ?? null;
 };
+
+const nestedId = (value) => {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  if (value && typeof value === 'object' && typeof value._id === 'string' && value._id.trim()) {
+    return value._id.trim();
+  }
+  return '';
+};
+
+const copyText = (value) => (value == null ? '' : String(value));
 
 const resolutionWarning = (source) => {
   if (source === 'passthrough') {
@@ -69,18 +93,24 @@ const resolutionWarning = (source) => {
 };
 
 export class MoneyloverClient {
-  constructor(token, { requestTimeout = 30000, timeZone } = {}) {
+  constructor(token, { requestTimeout = 30000, timeZone, refreshToken, onSession } = {}) {
     this.token = ensureString(token, 'token');
     this.requestTimeout = requestTimeout;
     this.timeZone = timeZone;
+    this.refreshToken = typeof refreshToken === 'string' && refreshToken ? refreshToken : null;
+    this.onSession = typeof onSession === 'function' ? onSession : null;
     this.#walletCategoryCache = new Map();
     this.#globalCategoriesCache = null;
+    this.#userInfo = null;
   }
 
   #walletCategoryCache;
   #globalCategoriesCache;
+  #userInfo;
 
-  static async getToken(email, password) {
+  static lastSession = null;
+
+  static async login(email, password) {
     const loginResponse = await fetch(LOGIN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
@@ -137,7 +167,68 @@ export class MoneyloverClient {
         'Access token not present in response';
       throw new Error(clip(message));
     }
-    return accessToken;
+    const refreshRaw = tokenPayload?.refresh_token ?? tokenPayload?.refreshToken ?? null;
+    const session = {
+      accessToken,
+      refreshToken: typeof refreshRaw === 'string' && refreshRaw ? refreshRaw : null
+    };
+    this.lastSession = session;
+    return session;
+  }
+
+  static async getToken(email, password) {
+    return (await this.login(email, password)).accessToken;
+  }
+
+  async refreshAccessToken() {
+    if (!this.refreshToken) {
+      throw new MoneyloverApiError('Not authorized error', { code: NOT_AUTHORIZED_CODE });
+    }
+    const response = await fetch(`${BASE_URL}/user/refresh-token`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        dataformat: 'json'
+      },
+      body: JSON.stringify({ refreshToken: this.refreshToken })
+    });
+    const payload = await readJson(response);
+    const code = apiErrorCode(payload);
+    const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+    const accessToken = data?.access_token || data?.accessToken;
+    const nextRefresh = data?.refresh_token || data?.refreshToken || this.refreshToken;
+    if (!response.ok || code || !accessToken) {
+      const device = deviceErrorMessage(code);
+      throw new MoneyloverApiError(device || payload?.msg || 'Not authorized error', {
+        code: code ?? NOT_AUTHORIZED_CODE,
+        detail: redact(payload)
+      });
+    }
+    this.token = accessToken;
+    this.refreshToken = typeof nextRefresh === 'string' ? nextRefresh : this.refreshToken;
+    if (this.onSession) {
+      await this.onSession({ token: this.token, refreshToken: this.refreshToken });
+    }
+    return this.token;
+  }
+
+  async whoami() {
+    const info = await this.getUserInfo();
+    this.#userInfo = info;
+    const wallets = unwrapList(await this.getWallets());
+    const tags = Array.isArray(info?.tags) ? info.tags : [];
+    return {
+      ok: true,
+      email: info?.email ?? null,
+      name: info?.name ?? info?.fullname ?? null,
+      deviceId: info?.deviceId ?? null,
+      purchased: Boolean(info?.purchased),
+      tags,
+      userCategoryV2: tags.includes('user_category_v2'),
+      walletCount: wallets.length,
+      activeWalletCount: wallets.filter((wallet) => !wallet?.archived).length
+    };
   }
 
   async getUserInfo() {
@@ -186,22 +277,41 @@ export class MoneyloverClient {
   }
 
   async editWallet(id, params = {}) {
+    const walletId = ensureString(id, 'walletId');
+    let existing = null;
+    try {
+      existing = unwrapList(await this.getWallets()).find((wallet) => wallet?._id === walletId) ?? null;
+    } catch (error) {
+      if (params.currencyId == null || params.name == null) {
+        throw new Error(
+          `Could not read wallet ${walletId}, so account type, exclude-from-total, and archived cannot be preserved. ${error.message}`,
+          { cause: error }
+        );
+      }
+    }
+
+    const currencySource = params.currencyId ?? existing?.currency_id;
+    const currencyId =
+      typeof currencySource === 'number' ? currencySource : Number.parseInt(String(currencySource ?? ''), 10);
+    if (!Number.isInteger(currencyId)) {
+      throw new Error('currencyId is required when the current wallet cannot be read');
+    }
+    const name = params.name != null ? ensureString(params.name, 'name') : existing?.name;
+    if (!name) {
+      throw new Error('name is required when the current wallet cannot be read');
+    }
+
+    const accountTypeSource = params.accountType ?? existing?.account_type ?? 0;
     const payload = {
-      _id: ensureString(id, 'walletId'),
-      currency_id:
-        typeof params.currencyId === 'number'
-          ? params.currencyId
-          : Number.parseInt(ensureString(String(params.currencyId ?? ''), 'currencyId'), 10)
+      _id: walletId,
+      name,
+      icon: params.icon != null ? ensureString(params.icon, 'icon') : (existing?.icon ?? 'icon_7'),
+      currency_id: currencyId,
+      account_type: Number(accountTypeSource),
+      exclude_total:
+        params.excludeFromTotal != null ? Boolean(params.excludeFromTotal) : Boolean(existing?.exclude_total),
+      archived: params.archived != null ? Boolean(params.archived) : Boolean(existing?.archived)
     };
-    if (!Number.isInteger(payload.currency_id)) {
-      throw new Error('currencyId must be an integer');
-    }
-    if (params.name != null) {
-      payload.name = ensureString(params.name, 'name');
-    }
-    if (params.icon != null) {
-      payload.icon = ensureString(params.icon, 'icon');
-    }
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/wallet/edit', payload };
     }
@@ -241,13 +351,20 @@ export class MoneyloverClient {
       icon: ensureString(params.icon, 'icon'),
       type: coerceCategoryType(params.type)
     };
+    if (params.parentId) {
+      payload.parentId = ensureString(params.parentId, 'parentId');
+    }
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/category/add', payload };
     }
-    const created = await this.#postJson('/category/add', payload);
-    this.#walletCategoryCache.delete(payload.walletId);
-    this.#globalCategoriesCache = null;
-    return created;
+    try {
+      const created = await this.#postJson('/category/add', payload);
+      this.#walletCategoryCache.delete(payload.walletId);
+      this.#globalCategoriesCache = null;
+      return created;
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'category');
+    }
   }
 
   async editCategory(id, params = {}) {
@@ -261,7 +378,11 @@ export class MoneyloverClient {
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/category/edit', payload };
     }
-    return this.#postJson('/category/edit', payload);
+    try {
+      return await this.#postJson('/category/edit', payload);
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'category');
+    }
   }
 
   async deleteCategory(id, { dryRun = false } = {}) {
@@ -269,7 +390,29 @@ export class MoneyloverClient {
     if (dryRun) {
       return { dryRun: true, endpoint: '/category/delete', payload };
     }
-    return this.#postJson('/category/delete', payload);
+    try {
+      return await this.#postJson('/category/delete', payload);
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'category');
+    }
+  }
+
+  async mergeCategories(fromCategoryId, toCategoryId, { dryRun = false } = {}) {
+    const payload = {
+      id1: ensureString(fromCategoryId, 'fromCategoryId'),
+      id2: ensureString(toCategoryId, 'toCategoryId')
+    };
+    if (dryRun) {
+      return { dryRun: true, endpoint: '/category/merge', payload };
+    }
+    try {
+      const merged = await this.#postJson('/category/merge', payload);
+      this.#walletCategoryCache.clear();
+      this.#globalCategoriesCache = null;
+      return merged;
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'category');
+    }
   }
 
   async getTransactions(walletId, startDate, endDate) {
@@ -354,6 +497,9 @@ export class MoneyloverClient {
       note,
       displayDate: date
     };
+    if (params.excludeReport != null) {
+      payload.exclude_report = Boolean(params.excludeReport);
+    }
 
     return {
       payload,
@@ -395,40 +541,81 @@ export class MoneyloverClient {
   }
 
   async editTransaction(id, params = {}) {
-    if (params.note == null) {
-      throw new Error(
-        'edit_transaction replaces the whole transaction. Pass note (use an empty string to clear it) so the existing note is not wiped.'
-      );
+    const transactionId = ensureString(id, 'transactionId');
+    const timeZone = params.timeZone ?? this.timeZone;
+    const lookupDates = [];
+    for (const candidate of [params.currentDate, params.date]) {
+      if (candidate) {
+        lookupDates.push(ensureDateString(candidate, { timeZone }));
+      }
     }
-    if (!Array.isArray(params.with)) {
+    const existing = await this.findTransactionById(transactionId, {
+      walletId: params.walletId,
+      dates: lookupDates
+    });
+    if (!existing) {
       throw new Error(
-        'edit_transaction replaces the whole transaction. Pass with (use an empty array to clear related parties).'
+        `Could not load transaction ${transactionId}, so the edit was not sent. Pass walletId and currentDate (the transaction's current day) so exclude_report, event, image, reminder, and location are kept.`
       );
     }
 
-    const walletId = ensureString(params.walletId, 'walletId');
-    const date = ensureDateString(params.date, { timeZone: params.timeZone ?? this.timeZone });
-    const resolved = await this.#resolveCategory(walletId, {
-      categoryId: params.categoryId,
-      categoryName: params.category
-    });
-    const amount = prepareAmount(params.amount, resolved.category?.type, {
-      amountMode: params.amountMode === 'signed' ? 'signed' : 'magnitude'
-    });
-    const payload = {
-      _id: ensureString(id, 'transactionId'),
-      account: walletId,
-      category: resolved.id,
-      amount: amount.amount,
-      displayDate: date,
-      note: String(params.note),
-      with: params.with.map((value) => String(value))
-    };
-    const warnings = [...amount.warnings];
-    const warning = resolutionWarning(resolved.source);
-    if (warning) {
-      warnings.push(warning);
+    const walletId = ensureString(params.walletId ?? nestedId(existing.account), 'walletId');
+    const warnings = [];
+    let categoryId = nestedId(existing.category);
+    if (params.categoryId || params.category) {
+      const resolved = await this.#resolveCategory(walletId, {
+        categoryId: params.categoryId,
+        categoryName: params.category
+      });
+      categoryId = resolved.id;
+      const warning = resolutionWarning(resolved.source);
+      if (warning) {
+        warnings.push(warning);
+      }
     }
+    if (!categoryId) {
+      throw new Error('categoryId is required when the existing transaction has no category');
+    }
+
+    let amount = formatAmount(Math.abs(parseAmount(existing.amount)));
+    if (params.amount != null) {
+      const prepared = prepareAmount(params.amount, existing.category?.type, {
+        amountMode: params.amountMode === 'signed' ? 'signed' : 'magnitude'
+      });
+      amount = prepared.amount;
+      warnings.push(...prepared.warnings);
+    }
+
+    const displayDate = params.date
+      ? ensureDateString(params.date, { timeZone })
+      : ensureDateString(existing.displayDate, { timeZone });
+    const payload = {
+      _id: transactionId,
+      account: walletId,
+      category: categoryId,
+      amount,
+      note: params.note != null ? String(params.note) : copyText(existing.note),
+      displayDate,
+      with: Array.isArray(params.with)
+        ? params.with.map((value) => String(value))
+        : Array.isArray(existing.with)
+          ? existing.with.map((value) => String(value))
+          : [],
+      event: params.eventId != null ? String(params.eventId) : nestedId(existing.event),
+      exclude_report: params.excludeReport != null ? Boolean(params.excludeReport) : Boolean(existing.exclude_report),
+      longtitude: copyText(existing.longtitude),
+      latitude: copyText(existing.latitude),
+      addressName: copyText(existing.addressName),
+      addressDetails: copyText(existing.addressDetails),
+      addressIcon: copyText(existing.addressIcon),
+      remind: existing.remind ?? '',
+      image: params.image != null ? String(params.image) : copyText(existing.images?.[0] ?? existing.image ?? '')
+    };
+    const parent = params.parentId != null ? String(params.parentId) : nestedId(existing.parent);
+    if (parent) {
+      payload.parent = parent;
+    }
+
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/transaction/edit', payload, warnings };
     }
@@ -442,8 +629,11 @@ export class MoneyloverClient {
     return { result: updated, warnings };
   }
 
-  async deleteTransaction(id, { dryRun = false } = {}) {
+  async deleteTransaction(id, { dryRun = false, deleteRelated = false } = {}) {
     const payload = { _id: ensureString(id, 'transactionId') };
+    if (deleteRelated) {
+      payload.delRelated = true;
+    }
     if (dryRun) {
       return { dryRun: true, endpoint: '/transaction/delete', payload };
     }
@@ -456,6 +646,64 @@ export class MoneyloverClient {
 
   async searchTransactions(filters = {}) {
     return this.#postJson('/transaction/search', filters);
+  }
+
+  async searchTransactionTotals(filters = {}) {
+    return this.#postJson('/transaction/search/balance', filters);
+  }
+
+  async searchAllTransactions(filters = {}, { pageSize = 100, maxPages = 20 } = {}) {
+    const transactions = [];
+    let offset = Number(filters.offset ?? 0) || 0;
+    let truncated = false;
+    for (let page = 0; page < maxPages; page += 1) {
+      const raw = await this.searchTransactions({ ...filters, limit: pageSize, offset });
+      const batch = unwrapList(raw);
+      transactions.push(...batch);
+      if (batch.length < pageSize) {
+        return { transactions, truncated: false };
+      }
+      offset += batch.length;
+      truncated = page === maxPages - 1;
+    }
+    return { transactions, truncated };
+  }
+
+  async findTransactionById(id, { walletId, dates = [] } = {}) {
+    const transactionId = ensureString(id, 'transactionId');
+    const uniqueDates = [...new Set(dates.filter(Boolean))];
+    const scan = async (filters, maxPages) => {
+      const collected = await this.searchAllTransactions(filters, { pageSize: 100, maxPages });
+      return collected.transactions.find((row) => row?._id === transactionId) ?? null;
+    };
+
+    for (const day of uniqueDates) {
+      const hit = await scan(
+        {
+          ...(walletId ? { accounts: [walletId] } : {}),
+          startDate: day,
+          endDate: day
+        },
+        5
+      );
+      if (hit) {
+        return hit;
+      }
+    }
+
+    if (walletId && uniqueDates.length === 0) {
+      const hit = await scan({ accounts: [walletId] }, 3);
+      if (hit) {
+        return hit;
+      }
+    }
+
+    try {
+      const related = unwrapList(await this.getRelatedTransactions([transactionId]));
+      return related.find((row) => row?._id === transactionId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async getDebtTransactions() {
@@ -514,6 +762,283 @@ export class MoneyloverClient {
     return this.#get('/other/config');
   }
 
+  async #categoryIdByMetadata(walletId, metadata, explicitId) {
+    if (explicitId) {
+      const resolved = await this.#resolveCategory(walletId, { categoryId: explicitId });
+      return resolved.id;
+    }
+    const walletList = await this.#walletCategories(walletId);
+    const globalList = await this.#globalCategories();
+    const matches = walletList.filter((category) => String(category.metadata ?? '') === metadata);
+    const owned = matches.filter((category) => (category.account ?? category.walletId ?? walletId) === walletId);
+    const hit = (owned.length > 0 ? owned : matches)[0];
+    if (!hit) {
+      const label = systemCategoryLabel(metadata) ?? metadata;
+      throw new Error(`No ${label} category (${metadata}) on wallet ${walletId}`);
+    }
+    const mapped = matchGlobalCategory(globalList, walletId, hit);
+    return (mapped ?? hit)._id;
+  }
+
+  async transferMoney(params) {
+    const fromWalletId = ensureString(params.fromWalletId, 'fromWalletId');
+    const toWalletId = ensureString(params.toWalletId, 'toWalletId');
+    if (fromWalletId === toWalletId) {
+      throw new Error('fromWalletId and toWalletId must be different wallets');
+    }
+    const date = ensureDateString(params.date, { timeZone: params.timeZone ?? this.timeZone });
+    const amount = prepareAmount(params.amount, CategoryType.EXPENSE, { amountMode: 'magnitude' });
+    const toAmount =
+      params.toAmount == null
+        ? amount
+        : prepareAmount(params.toAmount, CategoryType.INCOME, { amountMode: 'magnitude' });
+    const fromCategory = await this.#categoryIdByMetadata(fromWalletId, 'IS_OUTGOING_TRANSFER', params.fromCategoryId);
+    const toCategory = await this.#categoryIdByMetadata(toWalletId, 'IS_INCOMING_TRANSFER', params.toCategoryId);
+
+    let fromName = params.fromWalletName ?? '';
+    let toName = params.toWalletName ?? '';
+    if (!fromName || !toName) {
+      try {
+        const wallets = unwrapList(await this.getWallets());
+        fromName = fromName || wallets.find((wallet) => wallet?._id === fromWalletId)?.name || '';
+        toName = toName || wallets.find((wallet) => wallet?._id === toWalletId)?.name || '';
+      } catch {
+        fromName = fromName || '';
+        toName = toName || '';
+      }
+    }
+
+    const excludeReport = params.excludeReport === true;
+    const leg = (account, category, magnitude, note, extra = {}) => ({
+      account,
+      category,
+      amount: Number(magnitude),
+      note,
+      displayDate: date,
+      exclude_report: excludeReport,
+      with: [],
+      related: true,
+      ...extra
+    });
+    const transactions = [
+      leg(
+        fromWalletId,
+        fromCategory,
+        amount.amount,
+        params.fromNote ?? params.note ?? (toName ? `Transfer to ${toName}` : '')
+      ),
+      leg(toWalletId, toCategory, toAmount.amount, params.toNote ?? (fromName ? `Transfer from ${fromName}` : ''))
+    ];
+
+    if (params.feeAmount != null && Number(params.feeAmount) !== 0) {
+      const feeWalletId = params.feeWalletId ? ensureString(params.feeWalletId, 'feeWalletId') : fromWalletId;
+      const fee = prepareAmount(params.feeAmount, CategoryType.EXPENSE, { amountMode: 'magnitude' });
+      const feeCategory = await this.#categoryIdByMetadata(feeWalletId, 'IS_OTHER_EXPENSE', params.feeCategoryId);
+      transactions.push(leg(feeWalletId, feeCategory, fee.amount, params.feeNote ?? 'Transfer fee', { isFee: true }));
+    }
+
+    const payload = { transactions, action: 'transfermoney' };
+    if (params.dryRun === true) {
+      return { dryRun: true, endpoint: '/transaction/add-multi', payload };
+    }
+    return this.#postJson('/transaction/add-multi', payload);
+  }
+
+  async adjustBalance(params) {
+    const walletId = ensureString(params.walletId, 'walletId');
+    const target = typeof params.balance === 'number' ? params.balance : parseAmount(String(params.balance));
+    const currentBalance = readBalance(await this.getWalletBalance(walletId));
+    const delta = roundMoney(target - currentBalance);
+    if (Math.abs(delta) < 0.005) {
+      return { adjusted: false, walletId, currentBalance, targetBalance: target, delta: 0 };
+    }
+    const metadata = delta > 0 ? 'IS_OTHER_INCOME' : 'IS_OTHER_EXPENSE';
+    const categoryId = await this.#categoryIdByMetadata(walletId, metadata, params.categoryId);
+    const date = params.date
+      ? ensureDateString(params.date, { timeZone: this.timeZone })
+      : calendarDate(new Date(), { timeZone: this.timeZone });
+    const created = await this.addTransaction({
+      walletId,
+      categoryId,
+      amount: formatAmount(Math.abs(delta)),
+      date,
+      note: params.note ?? 'Balance adjustment',
+      excludeReport: params.excludeReport,
+      dryRun: params.dryRun === true
+    });
+    return {
+      adjusted: params.dryRun !== true,
+      walletId,
+      currentBalance,
+      targetBalance: target,
+      delta,
+      direction: delta > 0 ? 'income' : 'expense',
+      categoryMetadata: metadata,
+      transaction: created
+    };
+  }
+
+  async balanceAsOf({ walletId, date }) {
+    const id = ensureString(walletId, 'walletId');
+    const asOf = ensureDateString(date, { timeZone: this.timeZone });
+    const currentBalance = readBalance(await this.getWalletBalance(id));
+    const today = calendarDate(new Date(), { timeZone: this.timeZone });
+    if (asOf >= today) {
+      return {
+        walletId: id,
+        date: asOf,
+        balance: currentBalance,
+        currentBalance,
+        basis: 'current',
+        incomplete: false,
+        skipped: []
+      };
+    }
+    const collected = await this.searchAllTransactions({
+      accounts: [id],
+      startDate: addCalendarDays(asOf, 1),
+      endDate: today
+    });
+    let netAfter = 0;
+    const skipped = [];
+    for (const row of collected.transactions) {
+      const day = safeCalendarDate(row.displayDate, { timeZone: this.timeZone });
+      if (day && day <= asOf) {
+        continue;
+      }
+      const delta = signedTransactionDelta(row);
+      if (delta == null) {
+        skipped.push(row._id ?? null);
+        continue;
+      }
+      netAfter += delta;
+    }
+    return {
+      walletId: id,
+      date: asOf,
+      balance: roundMoney(currentBalance - netAfter),
+      currentBalance,
+      netAfterDate: roundMoney(netAfter),
+      transactionCount: collected.transactions.length,
+      basis: 'current_balance_minus_later_transactions',
+      incomplete: collected.truncated || skipped.length > 0,
+      skipped
+    };
+  }
+
+  async getBudgets({ walletId, finished } = {}) {
+    if (walletId && walletId !== 'all') {
+      const wid = encodeURIComponent(ensureString(walletId, 'walletId'));
+      return this.#post(`/budget/list/${wid}`, {
+        body: '{}',
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    const data = {};
+    if (finished != null) {
+      data.isFinished = Boolean(finished);
+    }
+    return this.#postJson('/budget/list/all', data);
+  }
+
+  async addBudget(params) {
+    const payload = {
+      walletId: ensureString(params.walletId, 'walletId'),
+      categoryId: ensureString(params.categoryId, 'categoryId'),
+      amount: Number(prepareAmount(params.amount, null).amount),
+      startDate: ensureDateString(params.startDate, { timeZone: this.timeZone }),
+      endDate: ensureDateString(params.endDate, { timeZone: this.timeZone }),
+      isRepeat: Boolean(params.isRepeat)
+    };
+    if (params.dryRun === true) {
+      return { dryRun: true, endpoint: '/budget/add', payload };
+    }
+    try {
+      return await this.#postJson('/budget/add', payload);
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'budget');
+    }
+  }
+
+  async editBudget(params) {
+    const payload = {
+      budgetId: ensureString(params.budgetId, 'budgetId'),
+      walletId: ensureString(params.walletId, 'walletId'),
+      categoryId: params.categoryId != null ? String(params.categoryId) : 0,
+      amount: Number(prepareAmount(params.amount, null).amount),
+      startDate: ensureDateString(params.startDate, { timeZone: this.timeZone }),
+      endDate: ensureDateString(params.endDate, { timeZone: this.timeZone }),
+      isRepeat: Boolean(params.isRepeat)
+    };
+    if (params.allId) {
+      payload.allId = params.allId;
+    }
+    if (params.allAmount != null) {
+      payload.allAmount = params.allAmount;
+    }
+    if (params.dryRun === true) {
+      return { dryRun: true, endpoint: '/budget/edit', payload };
+    }
+    try {
+      return await this.#postJson('/budget/edit', payload);
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'budget');
+    }
+  }
+
+  async deleteBudget(id, { typeDelete = 'only', dryRun = false } = {}) {
+    const mode = typeDelete === 'all' ? 'all' : 'only';
+    const payload = { _id: ensureString(id, 'budgetId'), typeDelete: mode };
+    if (dryRun) {
+      return { dryRun: true, endpoint: '/budget/delete', payload };
+    }
+    try {
+      return await this.#postJson('/budget/delete', payload);
+    } catch (error) {
+      throw await this.#explainWriteError(error, 'budget');
+    }
+  }
+
+  async getReport({ walletId = 'all', startDate, endDate, walletIds } = {}) {
+    const id = encodeURIComponent(ensureString(String(walletId), 'walletId'));
+    const data = {
+      startDate: ensureDateString(startDate, { timeZone: this.timeZone }),
+      endDate: ensureDateString(endDate, { timeZone: this.timeZone })
+    };
+    if (Array.isArray(walletIds) && walletIds.length > 0) {
+      data.walletIds = walletIds.map((value) => String(value));
+    }
+    return this.#postJson(`/report/${id}`, data);
+  }
+
+  async #explainWriteError(error, kind) {
+    if (!(error instanceof Error) || isAuthError(error) || isDeviceError(error)) {
+      return error;
+    }
+    if (error.code === 'CLOUDFLARE' || error.code === 'READ_ONLY' || error.code === 'USER_CATEGORY_V2') {
+      return error;
+    }
+    if (kind === 'category' || kind === 'budget') {
+      try {
+        const info = this.#userInfo ?? (await this.getUserInfo());
+        this.#userInfo = info;
+        const tags = Array.isArray(info?.tags) ? info.tags : [];
+        if (tags.includes('user_category_v2')) {
+          return new MoneyloverApiError(userCategoryV2Message(), {
+            code: 'USER_CATEGORY_V2',
+            detail: error.message
+          });
+        }
+      } catch {
+        return error;
+      }
+    }
+    if (looksLikeReadOnly(error.message)) {
+      return new MoneyloverApiError(readOnlyWriteMessage(), { code: 'READ_ONLY', detail: error.message });
+    }
+    return error;
+  }
+
   presentTransaction(transaction) {
     if (!transaction || typeof transaction !== 'object') {
       return transaction;
@@ -546,7 +1071,7 @@ export class MoneyloverClient {
     return { signal: controller.signal, clear: () => clearTimeout(timer) };
   }
 
-  async #request(path, { method, body, headers }) {
+  async #request(path, { method, body, headers, authRetried = false }) {
     const requestHeaders = new Headers(this.#authHeaders());
     if (headers) {
       for (const [key, value] of Object.entries(headers)) {
@@ -577,6 +1102,13 @@ export class MoneyloverClient {
 
     if (!response.ok) {
       const detail = clip(await response.text());
+      if (looksLikeCloudflare(response.status, detail)) {
+        throw new MoneyloverApiError(cloudflareWriteMessage(), { code: 'CLOUDFLARE', detail });
+      }
+      if (response.status === 401 && !authRetried && this.refreshToken) {
+        await this.refreshAccessToken();
+        return this.#request(path, { method, body, headers, authRetried: true });
+      }
       if (response.status === 401) {
         throw new MoneyloverApiError('user_unauthenticated', { code: 401, detail });
       }
@@ -589,9 +1121,14 @@ export class MoneyloverClient {
     return response;
   }
 
-  async #post(path, { body, headers } = {}) {
-    const response = await this.#request(path, { method: 'POST', body, headers });
+  async #post(path, { body, headers, authRetried = false } = {}) {
+    const response = await this.#request(path, { method: 'POST', body, headers, authRetried });
     const payload = await readJson(response);
+    const code = apiErrorCode(payload);
+    if (code === NOT_AUTHORIZED_CODE && !authRetried && this.refreshToken) {
+      await this.refreshAccessToken();
+      return this.#post(path, { body, headers, authRetried: true });
+    }
     return parseApiPayload(payload);
   }
 

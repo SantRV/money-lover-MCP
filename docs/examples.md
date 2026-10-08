@@ -277,36 +277,27 @@ Response:  { "_id": "webXXX...", "amount": 50000, "note": "Lunch", "displayDate"
 
 ### `edit_transaction`
 
-Updates a transaction. The Money Lover API is **full-replace** — every field must be supplied on every edit. Fetch the current transaction with `get_transactions` first if you only have the ID.
+Updates a transaction. The API replaces the stored row, so the server loads the current transaction first and sends back `exclude_report`, `event`, image, reminder, location, parties, and any debt parent along with your changes.
 
-`categoryId` should be the **global** category ID from the transaction's `category._id` field (as returned by `get_transactions`), or from `get_all_categories`. The server resolves wallet-specific IDs here too.
-
-**Required:** `transactionId`, `walletId`, `categoryId`, `amount`, `date`, `note`, `with`  
-Omitting `note` or `with` is rejected so a full-replace edit cannot clear them by accident.
+**Required:** `transactionId`  
+**Needed to find the row:** `walletId` and `currentDate` (the day it is on now)  
+**Optional:** `categoryId`, `amount`, `date`, `note`, `with`, `excludeReport`, `eventId`
 
 ```
 Prompt: "Update transaction bfa8b03330b24579849acdf50db11304 — change note to 'Team lunch'. Keep all other fields."
 ```
 
-Agent flow:
-1. Call `get_transactions` with `walletId` + date range to fetch current values.
-2. Extract `_id`, `account` (walletId), `category._id` (global categoryId), `amount`, `displayDate`.
-3. Call `edit_transaction` with all fields, only changing `note`.
-
 ```json
 Tool call: edit_transaction({
   transactionId: "bfa8b03330b24579849acdf50db11304",
   walletId:      "590f65bec16649948da1f4cfb94870c6",
-  categoryId:    "9c0aee5796c345d087c91c0ed5bcc689",
-  amount:        "50000",
-  date:          "2026-04-15",
-  note:          "Team lunch",
-  with:          []
+  currentDate:   "2026-04-15",
+  note:          "Team lunch"
 })
 Response:  {}
 ```
 
-> **Null response is success** — a `null` / empty `{}` response from `edit_transaction` means the update was accepted. An error object indicates failure.
+> Pass `walletId` and `currentDate` so the lookup can find the row. Omit a field to keep it. A `null` or `{}` response means the update was accepted.
 
 ### `delete_transaction`
 
@@ -522,14 +513,22 @@ Response:  { "config": { ... } }
 2. add_transaction({ walletId: "590f65b...", categoryId: "225c6924...", amount: "35000", date: "2026-04-18", note: "Groceries" })
 ```
 
-### Edit a transaction safely (full-replace)
+### Edit a transaction without wiping the other fields
 
 ```
-1. get_transactions({ walletId: "590f65b...", startDate: "2026-04-15", endDate: "2026-04-15" })
-   → find the transaction → copy _id, account, category._id, amount, displayDate
-
-2. edit_transaction({ transactionId: "bfa8b...", walletId: "590f65b...", categoryId: "9c0aee...", amount: "50000", date: "2026-04-15", note: "Updated note" })
+1. edit_transaction({
+     transactionId: "bfa8b...",
+     walletId: "590f65b...",
+     currentDate: "2026-04-15",
+     note: "Updated note"
+   })
 ```
+
+The server reads the row and writes the other fields back.
+
+### Australian dollars
+
+`get_currencies` is the catalogue. AUD is currency id 20.
 
 ### Create a wallet with the correct currency ID
 

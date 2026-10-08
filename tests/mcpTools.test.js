@@ -82,7 +82,7 @@ describe('MCP tools', () => {
     ]) {
       expect(names).toContain(name);
     }
-    expect(names).toHaveLength(36);
+    expect(names).toHaveLength(48);
     await client.close();
   });
 

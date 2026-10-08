@@ -16,15 +16,14 @@ const ensureCacheDir = async () => {
   return dir;
 };
 
-export const readToken = async (email) => {
+const readCacheFile = async (email) => {
   if (!email) {
     return null;
   }
   try {
     const raw = await fs.readFile(getTokenPath(email), 'utf8');
     const data = JSON.parse(raw);
-    const token = data?.token;
-    return typeof token === 'string' && token ? token : null;
+    return data && typeof data === 'object' ? data : null;
   } catch (error) {
     if (error.code === 'ENOENT') {
       return null;
@@ -33,7 +32,19 @@ export const readToken = async (email) => {
   }
 };
 
-export const writeToken = async (email, token) => {
+export const readToken = async (email) => {
+  const data = await readCacheFile(email);
+  const token = data?.token;
+  return typeof token === 'string' && token ? token : null;
+};
+
+export const readRefreshToken = async (email) => {
+  const data = await readCacheFile(email);
+  const refreshToken = data?.refreshToken;
+  return typeof refreshToken === 'string' && refreshToken ? refreshToken : null;
+};
+
+export const writeToken = async (email, token, extra = {}) => {
   if (!email || !token) {
     return;
   }
@@ -45,9 +56,16 @@ export const writeToken = async (email, token) => {
     throw new Error('Refusing to write a token cache file outside the cache directory');
   }
 
+  const refreshToken = Object.prototype.hasOwnProperty.call(extra, 'refreshToken')
+    ? typeof extra.refreshToken === 'string' && extra.refreshToken
+      ? extra.refreshToken
+      : null
+    : await readRefreshToken(email);
+
   const payload = {
     token,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    ...(refreshToken ? { refreshToken } : {})
   };
   const tempPath = path.join(dir, `.${encodeEmail(email)}.${process.pid}.tmp`);
   try {

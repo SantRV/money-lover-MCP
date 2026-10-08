@@ -1,18 +1,44 @@
 import { findDuplicate, fingerprintTransaction } from './duplicates.js';
 import { unwrapList } from './categories.js';
 import { safeCalendarDate } from './dates.js';
+import { appendImportLog, newBatchId, stripBatchMarker, withBatchMarker } from './importLog.js';
 
 const MAX_BATCH = 200;
+
+const fingerprintsFrom = (rows, timeZone) =>
+  rows
+    .map((transaction) => fingerprintTransaction(transaction, { timeZone }))
+    .filter((item) => item.date && item.cents != null);
 
 export const loadFingerprints = async (client, walletId, dates, timeZone) => {
   const usable = dates.filter(Boolean).sort();
   if (usable.length === 0) {
     return [];
   }
-  const data = await client.getTransactions(walletId, usable[0], usable[usable.length - 1]);
-  return unwrapList(data)
-    .map((transaction) => fingerprintTransaction(transaction, { timeZone }))
-    .filter((item) => item.date && item.cents != null);
+  const startDate = usable[0];
+  const endDate = usable[usable.length - 1];
+  try {
+    if (typeof client.searchAllTransactions === 'function') {
+      const collected = await client.searchAllTransactions({
+        accounts: [walletId],
+        startDate,
+        endDate
+      });
+      const rows = Array.isArray(collected) ? collected : (collected?.transactions ?? []);
+      return fingerprintsFrom(rows, timeZone);
+    }
+    const searched = await client.searchTransactions({
+      accounts: [walletId],
+      startDate,
+      endDate,
+      limit: 200,
+      offset: 0
+    });
+    return fingerprintsFrom(unwrapList(searched), timeZone);
+  } catch {
+    const data = await client.getTransactions(walletId, startDate, endDate);
+    return fingerprintsFrom(unwrapList(data), timeZone);
+  }
 };
 
 /**
@@ -33,6 +59,8 @@ export const createTransactions = async (client, options) => {
   const dryRun = options.dryRun === true;
   const amountMode = options.amountMode === 'signed' ? 'signed' : 'magnitude';
   const timeZone = options.timeZone;
+  const markBatch = options.markBatch === true || Boolean(options.batchId);
+  const batchId = markBatch ? (options.batchId ?? newBatchId()) : null;
 
   let existing = [];
   if (skipDuplicates) {
@@ -69,10 +97,13 @@ export const createTransactions = async (client, options) => {
         dateOrder: options.dateOrder,
         direction: row.direction
       });
+      const noteForMatch = stripBatchMarker(prepared.note);
+      const storedNote = withBatchMarker(prepared.note, batchId);
+      const payload = { ...prepared.payload, note: storedNote };
       const candidate = {
         date: prepared.date,
         cents: prepared.cents,
-        note: prepared.note
+        note: noteForMatch
       };
       const duplicate = skipDuplicates ? findDuplicate(candidate, existing.concat(accepted)) : null;
       if (duplicate) {
@@ -80,8 +111,8 @@ export const createTransactions = async (client, options) => {
           index,
           status: 'skipped_duplicate',
           date: prepared.date,
-          amount: prepared.payload.amount,
-          note: prepared.note,
+          amount: payload.amount,
+          note: storedNote,
           categoryId: prepared.categoryId,
           direction: prepared.direction,
           matchId: duplicate.id
@@ -95,25 +126,29 @@ export const createTransactions = async (client, options) => {
           index,
           status: 'dry_run',
           date: prepared.date,
-          amount: prepared.payload.amount,
-          note: prepared.note,
+          amount: payload.amount,
+          note: storedNote,
           categoryId: prepared.categoryId,
           direction: prepared.direction,
           warnings: prepared.warnings,
-          payload: prepared.payload
+          payload
         });
         continue;
       }
 
-      const created = await client.addPreparedTransaction(prepared);
-      accepted.push({ ...candidate, id: created?._id ?? null });
+      const created = await client.addPreparedTransaction({ ...prepared, payload });
+      const createdId = created?._id ?? null;
+      if (batchId && createdId) {
+        await appendImportLog(batchId, { id: createdId, walletId });
+      }
+      accepted.push({ ...candidate, id: createdId });
       results.push({
         index,
         status: 'created',
-        id: created?._id ?? null,
+        id: createdId,
         date: prepared.date,
-        amount: prepared.payload.amount,
-        note: prepared.note,
+        amount: payload.amount,
+        note: storedNote,
         categoryId: prepared.categoryId,
         direction: prepared.direction,
         warnings: prepared.warnings
@@ -131,6 +166,7 @@ export const createTransactions = async (client, options) => {
   return {
     dryRun,
     skipDuplicates,
+    batchId,
     created: count('created'),
     skipped: count('skipped_duplicate'),
     failed: count('error'),

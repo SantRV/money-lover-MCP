@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categoryTypeName, selectCategory } from '../src/categories.js';
+import { categoryTypeName, selectCategory, summarizeCategory } from '../src/categories.js';
 
 describe('categories', () => {
   const wallet = [
@@ -10,6 +10,21 @@ describe('categories', () => {
     { _id: 'global-food', name: 'Food', type: 2, account: 'w1', metadata: 'food0' },
     { _id: 'global-pay', name: 'Salary', type: 1, account: 'w1', metadata: 'salary0' }
   ];
+
+  it('labels system categories and keeps the parent and wallet', () => {
+    const summary = summarizeCategory({
+      _id: 'cat-debt',
+      name: 'Debt',
+      type: 1,
+      metadata: 'IS_DEBT',
+      account: 'w1',
+      parent: { _id: 'parent-1', name: 'Income' }
+    });
+    expect(summary.systemLabel).toBe('Debt');
+    expect(summary.typeName).toBe('income');
+    expect(summary.parentId).toBe('parent-1');
+    expect(summary.walletId).toBe('w1');
+  });
 
   it('names type 1 income and type 2 expense', () => {
     expect(categoryTypeName(1)).toBe('income');

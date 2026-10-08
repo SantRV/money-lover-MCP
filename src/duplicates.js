@@ -1,8 +1,9 @@
 import { amountCents } from './amounts.js';
 import { safeCalendarDate } from './dates.js';
+import { stripBatchMarker } from './importLog.js';
 
 export const normalizeNote = (note) =>
-  String(note ?? '')
+  stripBatchMarker(note)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();

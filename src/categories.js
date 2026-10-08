@@ -53,9 +53,31 @@ export const unwrapList = (payload) => {
 
 const metadataKey = (value) => (value == null ? '' : String(value));
 
+/**
+ * System categories from the Money Lover web bundle (metadata → English label).
+ * `type` on these rows is still 1 (income) or 2 (expense).
+ */
+export const SYSTEM_CATEGORY_LABELS = Object.freeze({
+  IS_OTHER_EXPENSE: 'Other expense',
+  IS_OTHER_INCOME: 'Other income',
+  IS_DEBT: 'Debt',
+  IS_LOAN: 'Loan',
+  IS_REPAYMENT: 'Repayment',
+  IS_DEBT_COLLECTION: 'Debt collection',
+  IS_PAY_INTEREST: 'Pay interest',
+  IS_COLLECT_INTEREST: 'Collect interest',
+  IS_OUTGOING_TRANSFER: 'Outgoing transfer',
+  IS_INCOMING_TRANSFER: 'Incoming transfer',
+  IS_UNCATEGORIZED_EXPENSE: 'Uncategorized expense',
+  IS_UNCATEGORIZED_INCOME: 'Uncategorized income'
+});
+
+export const systemCategoryLabel = (metadata) => SYSTEM_CATEGORY_LABELS[metadataKey(metadata)] ?? null;
+
 export const summarizeCategory = (category) => {
   const parent = category?.parent && typeof category.parent === 'object' ? category.parent : null;
   const type = category?.type == null ? null : Number(category.type);
+  const metadata = metadataKey(category?.metadata);
   return {
     id: category?._id ?? null,
     _id: category?._id ?? null,
@@ -63,9 +85,10 @@ export const summarizeCategory = (category) => {
     type,
     typeName: categoryTypeName(type),
     icon: category?.icon ?? null,
-    metadata: metadataKey(category?.metadata),
+    metadata,
+    systemLabel: systemCategoryLabel(metadata),
     walletId: category?.account ?? category?.walletId ?? null,
-    parentId: parent?._id ?? (typeof category?.parent === 'string' ? category.parent : null),
+    parentId: parent?._id ?? (typeof category?.parent === 'string' ? category.parent : (category?.parentId ?? null)),
     parentName: parent?.name ?? null
   };
 };

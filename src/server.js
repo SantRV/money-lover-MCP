@@ -6,14 +6,26 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { MoneyloverClient } from './moneyloverClient.js';
-import { isAuthError } from './authError.js';
-import { readToken, removeToken, writeToken } from './tokenCache.js';
+import { isAuthError, isDeviceError } from './authError.js';
+import * as tokenCache from './tokenCache.js';
+
+const { readToken, removeToken, writeToken } = tokenCache;
+const readRefreshToken = (() => {
+  try {
+    return typeof tokenCache.readRefreshToken === 'function' ? tokenCache.readRefreshToken : async () => null;
+  } catch {
+    return async () => null;
+  }
+})();
 import { clip, redact } from './redact.js';
 import { pageItems } from './paging.js';
 import { summarizeCategory, unwrapList } from './categories.js';
 import { rowsFromBankCsv } from './csv.js';
 import { createTransactions } from './transactions.js';
 import { assertConfirm } from './safety.js';
+import { buildSearchFilter } from './searchFilters.js';
+import { undoImport } from './importUndo.js';
+import { assertBatchId } from './importLog.js';
 
 const require = createRequire(import.meta.url);
 const { version: SERVER_VERSION } = require('../package.json');
@@ -124,6 +136,7 @@ const getEnvConfig = () => {
 
 let cachedEnvEmail = '';
 let cachedEnvToken = '';
+let cachedRefreshToken = '';
 let envTokenPromise = null;
 let cacheLoaded = false;
 let cachedEnvUsesDirectToken = false;
@@ -169,7 +182,24 @@ const clientOptions = () => {
   };
 };
 
-const withClient = async (token, fn) => fn(new MoneyloverClient(token, clientOptions()));
+const withClient = async (token, fn) =>
+  fn(
+    new MoneyloverClient(token, {
+      ...clientOptions(),
+      refreshToken: cachedRefreshToken || null,
+      onSession: async (next) => {
+        cachedEnvToken = next.token;
+        cachedRefreshToken = next.refreshToken ?? '';
+        if (cachedEnvEmail) {
+          try {
+            await writeToken(cachedEnvEmail, next.token, { refreshToken: next.refreshToken ?? null });
+          } catch (error) {
+            warn('Failed to persist refreshed Money Lover token', error);
+          }
+        }
+      }
+    })
+  );
 
 const hasEnvCredentials = () => {
   const { email, password, directToken } = getEnvConfig();
@@ -214,6 +244,7 @@ const fetchEnvToken = async (forceRefresh = false) => {
 
   if (forceRefresh) {
     cachedEnvToken = '';
+    cachedRefreshToken = '';
     envTokenPromise = null;
     cacheLoaded = false;
     try {
@@ -229,6 +260,13 @@ const fetchEnvToken = async (forceRefresh = false) => {
       if (storedToken) {
         cachedEnvToken = storedToken;
       }
+      if (typeof readRefreshToken === 'function') {
+        try {
+          cachedRefreshToken = (await readRefreshToken(email)) ?? '';
+        } catch (error) {
+          warn('Failed to read cached Money Lover refresh token', error);
+        }
+      }
     } catch (error) {
       warn('Failed to read cached Money Lover token', error);
     }
@@ -242,12 +280,19 @@ const fetchEnvToken = async (forceRefresh = false) => {
   if (!envTokenPromise) {
     envTokenPromise = MoneyloverClient.getToken(email, password)
       .then(async (token) => {
+        const refreshToken =
+          MoneyloverClient.lastSession?.accessToken === token ? MoneyloverClient.lastSession.refreshToken : null;
         try {
-          await writeToken(email, token);
+          if (refreshToken) {
+            await writeToken(email, token, { refreshToken });
+          } else {
+            await writeToken(email, token);
+          }
         } catch (error) {
           warn('Failed to persist Money Lover token', error);
         }
         cachedEnvToken = token;
+        cachedRefreshToken = refreshToken ?? '';
         cacheLoaded = true;
         envTokenPromise = null;
         return token;
@@ -279,7 +324,7 @@ const runWithResolvedToken = async (providedToken, fn) => {
   try {
     return await fn(token);
   } catch (error) {
-    if (usedEnvToken && isAuthError(error)) {
+    if (usedEnvToken && isAuthError(error) && !isDeviceError(error)) {
       const refreshedToken = await fetchEnvToken(true);
       if (!refreshedToken || refreshedToken === token) {
         throw error;
@@ -300,11 +345,12 @@ const guard = (fn) => async (args) => {
   }
 };
 
-const rememberLogin = (email, token) => {
+const rememberLogin = (email, token, refreshToken = null) => {
   const { email: envEmail } = getEnvConfig();
   if (email === envEmail && envEmail) {
     cachedEnvEmail = envEmail;
     cachedEnvToken = token;
+    cachedRefreshToken = refreshToken ?? '';
     cacheLoaded = true;
     cachedEnvUsesDirectToken = false;
   }
@@ -362,15 +408,19 @@ const registerMoneyloverTools = (server) => {
       }
     },
     guard(async ({ email, password }) => {
-      const token = await MoneyloverClient.getToken(email, password);
+      const session = await MoneyloverClient.login(email, password);
       let cached = true;
       try {
-        await writeToken(email, token);
+        if (session.refreshToken) {
+          await writeToken(email, session.accessToken, { refreshToken: session.refreshToken });
+        } else {
+          await writeToken(email, session.accessToken);
+        }
       } catch (error) {
         cached = false;
         warn('Failed to persist Money Lover token', error);
       }
-      rememberLogin(email, token);
+      rememberLogin(email, session.accessToken, session.refreshToken);
       return { authenticated: true, email, cached };
     })
   );
@@ -383,6 +433,17 @@ const registerMoneyloverTools = (server) => {
       inputSchema: {}
     },
     guard(() => runWithClient(undefined, (client) => client.getUserInfo()))
+  );
+
+  server.registerTool(
+    'whoami',
+    {
+      title: 'Check Connection',
+      description:
+        'Check the Money Lover session. Returns the account email, whether the account is tagged user_category_v2, and how many wallets the session can see. Does not return tokens.',
+      inputSchema: {}
+    },
+    guard(() => runWithClient(undefined, (client) => client.whoami()))
   );
 
   server.registerTool(
@@ -406,7 +467,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Get Categories',
       description:
-        'Categories for one wallet, including type (1 income, 2 expense) and typeName. Prefer list_categories when choosing a category for an import.',
+        'Categories for one wallet. type 1 is income and type 2 is expense. systemLabel names built-in categories such as Other expense, Debt, and Repayment. parentId and walletId (account) are included when the API sends them. The id on this list can differ from the global id add_transaction needs; add_transaction resolves a wallet id when name and metadata match.',
       inputSchema: walletIdArgument,
       outputSchema: {
         categories: z.array(z.record(z.any()))
@@ -416,7 +477,7 @@ const registerMoneyloverTools = (server) => {
       const data = (await runWithClient(undefined, (client) => client.getCategories(walletId))) ?? [];
       const categories = unwrapList(data).map((category) => ({
         ...category,
-        typeName: summarizeCategory(category).typeName
+        ...summarizeCategory(category)
       }));
       return { categories };
     })
@@ -436,7 +497,11 @@ const registerMoneyloverTools = (server) => {
         id: category.id,
         name: category.name,
         type: category.type,
-        typeName: category.typeName
+        typeName: category.typeName,
+        systemLabel: category.systemLabel,
+        metadata: category.metadata,
+        parentId: category.parentId,
+        walletId: category.walletId
       });
       return {
         walletId,
@@ -537,7 +602,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Transactions',
       description:
-        'Import a batch of transactions (max 200). Each row needs date, amount, note, and category or categoryId. Returns one result per row (created, skipped_duplicate, dry_run, or error) and continues after a row fails. Duplicates are the same wallet, calendar date, absolute amount, and similar note. skipDuplicates defaults to true. Use dryRun to preview. Amounts are stored as positive magnitudes; category type selects income or expense.',
+        'Import a batch of transactions (max 200). Each row needs date, amount, note, and category or categoryId. Returns one result per row (created, skipped_duplicate, dry_run, or error) and continues after a row fails. Duplicates are the same wallet, calendar date, absolute amount, and similar note, matched through /transaction/search. Each written note gets an ml-batch marker and the created ids are stored locally so undo_import can remove them. skipDuplicates defaults to true. Use dryRun to preview. Amounts are stored as positive magnitudes; category type selects income or expense.',
       inputSchema: {
         ...walletIdArgument,
         transactions: z
@@ -559,17 +624,27 @@ const registerMoneyloverTools = (server) => {
         amountMode: z
           .enum(['magnitude', 'signed'])
           .optional()
-          .describe('magnitude (default) or signed. See add_transaction.')
+          .describe('magnitude (default) or signed. See add_transaction.'),
+        batchId: z
+          .string()
+          .min(4)
+          .max(80)
+          .optional()
+          .describe(
+            'Id stored as an ml-batch marker in each note and in the local import log. A new id is used when omitted.'
+          )
       }
     },
-    guard(async ({ walletId, transactions, skipDuplicates, dryRun, amountMode }) =>
+    guard(async ({ walletId, transactions, skipDuplicates, dryRun, amountMode, batchId }) =>
       runWithClient(undefined, (client) =>
         createTransactions(client, {
           walletId,
           transactions,
           skipDuplicates,
           dryRun,
-          amountMode
+          amountMode,
+          markBatch: true,
+          batchId
         })
       )
     )
@@ -664,7 +739,8 @@ const registerMoneyloverTools = (server) => {
             })),
             skipDuplicates,
             dryRun,
-            amountMode: mode
+            amountMode: mode,
+            markBatch: true
           })
         );
         return {
@@ -803,27 +879,67 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Search Transactions',
       description:
-        'Search transactions. Pass filters such as walletId, categoryId, or a keyword if the API accepts it. displayDate values are normalized to YYYY-MM-DD. The page reports total and truncated. Default limit is 50.',
+        'Search transactions with the web app filter: accounts (wallet ids), categoryIDs, startDate, endDate, note, with, and amount {from, to}. limit and offset are sent to /transaction/search (the web app uses pages of 50). displayDate is normalized to YYYY-MM-DD. Duplicate checks for imports use this same filter.',
       inputSchema: {
-        filters: z.record(z.any()).optional().describe('Filter object forwarded to /transaction/search'),
-        limit: z.number().int().min(1).max(500).optional().describe('Page size. Default 50.'),
-        offset: z.number().int().min(0).optional()
+        accounts: z.array(z.string().min(1)).optional().describe('Wallet ids. Alias: walletId.'),
+        walletId: z.string().min(1).optional().describe('Single wallet id, sent as accounts: [walletId].'),
+        categoryIDs: z.array(z.string().min(1)).optional().describe('Category ids.'),
+        categoryId: z.string().min(1).optional().describe('One category id, sent as categoryIDs.'),
+        startDate: dateArgument.optional(),
+        endDate: dateArgument.optional(),
+        note: z.string().optional().describe('Note text. The web app sends this as note.'),
+        with: z.array(z.string()).optional().describe('Related parties.'),
+        amountFrom: z.number().optional().describe('Minimum amount, sent as amount.from.'),
+        amountTo: z.number().optional().describe('Maximum amount, sent as amount.to.'),
+        limit: z.number().int().min(1).max(200).optional().describe('Page size sent to the API. Default 50.'),
+        offset: z.number().int().min(0).optional().describe('Offset sent to the API. Default 0.')
       }
     },
-    guard(async ({ filters, limit = 50, offset = 0 }) =>
+    guard(async ({ limit = 50, offset = 0, ...filters }) =>
       runWithClient(undefined, async (client) => {
-        const raw = await client.searchTransactions(filters ?? {});
+        const query = buildSearchFilter({ ...filters, limit, offset }, { timeZone: process.env.MONEYLOVER_TIMEZONE });
+        const raw = await client.searchTransactions(query);
         const presented = presentTransactions(client, raw);
-        const page = pageItems(presented.transactions, { limit, offset, maxLimit: 500 });
-        const total = presented.reportedTotal ?? page.total;
+        const returned = presented.transactions.length;
+        const total = presented.reportedTotal;
+        const truncated = total != null ? offset + returned < total : returned === limit;
         return {
-          transactions: page.items,
+          transactions: presented.transactions,
+          filter: query,
           total,
-          returned: page.returned,
-          truncated: page.truncated || total > page.offset + page.returned,
-          offset: page.offset,
-          nextOffset: page.truncated ? page.offset + page.returned : null
+          returned,
+          truncated,
+          offset,
+          nextOffset: truncated ? offset + returned : null
         };
+      })
+    )
+  );
+
+  server.registerTool(
+    'search_transaction_totals',
+    {
+      title: 'Search Transaction Totals',
+      description:
+        'Totals for the same filter as search_transactions, via /transaction/search/balance. The archived web app posts the filter object and reads data on get_transaction_success. The exact total fields depend on the account and were not checked live.',
+      inputSchema: {
+        accounts: z.array(z.string().min(1)).optional(),
+        walletId: z.string().min(1).optional(),
+        categoryIDs: z.array(z.string().min(1)).optional(),
+        categoryId: z.string().min(1).optional(),
+        startDate: dateArgument.optional(),
+        endDate: dateArgument.optional(),
+        note: z.string().optional(),
+        with: z.array(z.string()).optional(),
+        amountFrom: z.number().optional(),
+        amountTo: z.number().optional()
+      }
+    },
+    guard((filters) =>
+      runWithClient(undefined, async (client) => {
+        const query = buildSearchFilter(filters, { timeZone: process.env.MONEYLOVER_TIMEZONE });
+        const totals = await client.searchTransactionTotals(query);
+        return { filter: query, totals };
       })
     )
   );
@@ -999,15 +1115,30 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Edit Transaction',
       description:
-        'Replace a transaction. Money Lover requires the full payload on every edit: walletId, categoryId, amount, date, note, and with. Omitted note or with is rejected so an edit cannot silently clear them. Fetch the current transaction first and pass every field back, changing only what you intend to change. dryRun previews the payload.',
+        'Change a transaction without wiping the rest of it. The server loads the current row (pass walletId and currentDate so the search can find it), then writes account, category, amount, note, date, with, exclude_report, event, image, reminder, location, and the debt parent. Omit a field to keep the stored value. Pass an empty string or empty array only when you mean to clear note or with. dryRun previews the merged payload.',
       inputSchema: {
         transactionId: z.string().min(1).describe('Transaction identifier'),
-        walletId: z.string().min(1).describe('Wallet identifier'),
-        categoryId: z.string().min(1).describe('Category id. Wallet ids are resolved to the global id when possible.'),
-        amount: amountArgument,
-        date: dateArgument,
-        note: z.string().describe('Note to store. Pass an empty string to clear it.'),
-        with: z.array(z.string()).describe('Related parties. Pass an empty array to clear them.'),
+        walletId: z.string().min(1).optional().describe('Wallet id. Required to find the row when currentDate is set.'),
+        currentDate: dateArgument
+          .optional()
+          .describe('The transaction’s current day, used to find it. Use this when date is the new day.'),
+        categoryId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Replacement category id. Wallet ids are resolved when possible.'),
+        category: z.string().min(1).optional().describe('Replacement category name.'),
+        amount: amountArgument.optional(),
+        date: dateArgument.optional().describe('New calendar date. Omit to keep the current day.'),
+        note: z.string().optional().describe('Replacement note. Omit to keep the current note.'),
+        with: z.array(z.string()).optional().describe('Replacement parties. Omit to keep the current list.'),
+        excludeReport: z.boolean().optional().describe('exclude_report. Omit to keep the current flag.'),
+        eventId: z
+          .string()
+          .optional()
+          .describe('Event id. Omit to keep the current event. Pass an empty string to clear it.'),
+        image: z.string().optional().describe('Image reference. Omit to keep the current image.'),
+        parentId: z.string().optional().describe('Debt or loan parent transaction id.'),
         dryRun: dryRunArgument
       }
     },
@@ -1021,16 +1152,22 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Delete Transaction',
       description:
-        'Permanently delete a transaction. Requires confirm: true. Pass dryRun: true to preview without deleting.',
+        'Permanently delete a transaction. Requires confirm: true. Pass dryRun: true to preview without deleting. Set deleteRelated: true to also delete the other leg of a transfer (the web app sends delRelated).',
       inputSchema: {
         transactionId: z.string().min(1).describe('Transaction identifier'),
+        deleteRelated: z
+          .boolean()
+          .optional()
+          .describe('When true, the API also deletes the related transfer leg. Default false.'),
         confirm: confirmArgument,
         dryRun: dryRunArgument
       }
     },
-    guard(async ({ transactionId, confirm, dryRun }) => {
+    guard(async ({ transactionId, confirm, dryRun, deleteRelated }) => {
       assertConfirm({ confirm, dryRun, action: 'delete this transaction' });
-      return runWithClient(undefined, (client) => client.deleteTransaction(transactionId, { dryRun: dryRun === true }));
+      return runWithClient(undefined, (client) =>
+        client.deleteTransaction(transactionId, { dryRun: dryRun === true, deleteRelated: deleteRelated === true })
+      );
     })
   );
 
@@ -1038,7 +1175,8 @@ const registerMoneyloverTools = (server) => {
     'add_wallet',
     {
       title: 'Add Wallet',
-      description: 'Create a wallet. currencyId comes from get_currencies. dryRun previews the payload.',
+      description:
+        'Create a wallet. currencyId comes from get_currencies. Australian dollars are currency id 20 in the Money Lover catalogue (confirm with get_currencies if that list changes). dryRun previews the payload.',
       inputSchema: {
         name: z.string().min(1).describe('Wallet name'),
         currencyId: z.number().int().positive().describe('Currency id'),
@@ -1056,12 +1194,19 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Edit Wallet',
       description:
-        'Update a wallet. currencyId is required by the API even when you only rename the wallet. Pass the current currency id to keep it. dryRun previews the payload.',
+        'Update a wallet. The current wallet is read first so credit (account_type, 4 for a credit wallet), exclude_total, and archived are sent back. Pass a field only when you want to change it. currencyId can be omitted when the wallet can be read. AUD is currency id 20. dryRun previews the payload.',
       inputSchema: {
         walletId: z.string().min(1),
-        currencyId: z.number().int().positive().describe('Currency id, required even when unchanged'),
+        currencyId: z.number().int().positive().optional().describe('Currency id. Omit to keep the current one.'),
         name: z.string().min(1).optional(),
         icon: z.string().optional(),
+        accountType: z
+          .number()
+          .int()
+          .optional()
+          .describe('Wallet type. 0 basic, 2 linked, 4 credit. Omit to keep the current type.'),
+        excludeFromTotal: z.boolean().optional().describe('exclude_total. Omit to keep the current flag.'),
+        archived: z.boolean().optional().describe('Archived flag. Omit to keep the current flag.'),
         dryRun: dryRunArgument
       }
     },
@@ -1093,12 +1238,13 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Category',
       description:
-        'Create a category. type 1 is income and type 2 is expense. icon comes from get_icons (for example icon_3). dryRun previews the payload.',
+        'Create a category. type 1 is income and type 2 is expense. icon comes from get_icons (for example icon_3). parentId makes this a sub-category of that category. Accounts tagged user_category_v2 cannot change categories. dryRun previews the payload.',
       inputSchema: {
         walletId: z.string().min(1),
         name: z.string().min(1),
         icon: z.string().min(1).describe('Icon name from get_icons'),
         type: z.number().int().min(1).max(2).describe('1 = income, 2 = expense'),
+        parentId: z.string().min(1).optional().describe('Parent category id for a sub-category.'),
         dryRun: dryRunArgument
       }
     },
@@ -1139,6 +1285,204 @@ const registerMoneyloverTools = (server) => {
       return runWithClient(undefined, (client) => client.deleteCategory(categoryId, { dryRun: dryRun === true }));
     })
   );
+
+  server.registerTool(
+    'merge_categories',
+    {
+      title: 'Merge Categories',
+      description:
+        'Merge one category into another via /category/merge {id1, id2}. id1 is the category that goes away and id2 is the category that remains. The web app moves transactions, and child categories follow the target. This cannot be undone. Requires confirm: true. Accounts tagged user_category_v2 cannot merge categories.',
+      inputSchema: {
+        fromCategoryId: z.string().min(1).describe('Category to merge away (id1).'),
+        toCategoryId: z.string().min(1).describe('Category that remains (id2).'),
+        confirm: confirmArgument,
+        dryRun: dryRunArgument
+      }
+    },
+    guard(async ({ fromCategoryId, toCategoryId, confirm, dryRun }) => {
+      assertConfirm({ confirm, dryRun, action: 'merge these categories' });
+      return runWithClient(undefined, (client) =>
+        client.mergeCategories(fromCategoryId, toCategoryId, { dryRun: dryRun === true })
+      );
+    })
+  );
+
+  server.registerTool(
+    'transfer_money',
+    {
+      title: 'Transfer Money',
+      description:
+        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Categories default to Outgoing transfer, Incoming transfer, and Other expense. dryRun previews the legs.',
+      inputSchema: {
+        fromWalletId: z.string().min(1),
+        toWalletId: z.string().min(1),
+        amount: amountArgument.describe('Amount leaving the source wallet.'),
+        toAmount: amountArgument.optional().describe('Amount arriving in the destination wallet. Defaults to amount.'),
+        date: dateArgument,
+        note: z.string().optional().describe('Note on the outgoing leg when fromNote is omitted.'),
+        fromNote: z.string().optional(),
+        toNote: z.string().optional(),
+        feeAmount: amountArgument.optional().describe('Optional fee, posted as its own expense leg.'),
+        feeWalletId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Wallet charged for the fee. Defaults to the source wallet.'),
+        feeNote: z.string().optional(),
+        fromCategoryId: z.string().optional(),
+        toCategoryId: z.string().optional(),
+        feeCategoryId: z.string().optional(),
+        excludeReport: z.boolean().optional(),
+        dryRun: dryRunArgument
+      }
+    },
+    guard((params) => runWithClient(undefined, (client) => client.transferMoney(params)))
+  );
+
+  server.registerTool(
+    'adjust_balance',
+    {
+      title: 'Adjust Balance',
+      description:
+        'Set a wallet balance by adding one transaction for the difference, in the wallet Other income category when the balance must rise and Other expense when it must fall. This is what the web app’s adjust-balance action does. dryRun previews the transaction.',
+      inputSchema: {
+        ...walletIdArgument,
+        balance: z.union([z.number(), z.string()]).describe('The balance the wallet should show after the adjustment.'),
+        date: dateArgument.optional().describe('Adjustment date. Default is today in MONEYLOVER_TIMEZONE.'),
+        note: z.string().optional().describe('Note. Default "Balance adjustment".'),
+        categoryId: z.string().optional().describe('Override the Other income or Other expense category.'),
+        excludeReport: z.boolean().optional(),
+        dryRun: dryRunArgument
+      }
+    },
+    guard((params) => runWithClient(undefined, (client) => client.adjustBalance(params)))
+  );
+
+  server.registerTool(
+    'get_balance_as_of',
+    {
+      title: 'Balance As Of Date',
+      description:
+        'Balance at the end of a calendar date. Starts from the current /wallet/balance and subtracts income and expense posted after that date. Transactions with no category type are listed in skipped and incomplete is true. There is no dedicated balance-as-of endpoint in the web app.',
+      inputSchema: {
+        ...walletIdArgument,
+        date: dateArgument.describe('The calendar date to measure, YYYY-MM-DD.')
+      }
+    },
+    guard(({ walletId, date }) => runWithClient(undefined, (client) => client.balanceAsOf({ walletId, date })))
+  );
+
+  server.registerTool(
+    'undo_import',
+    {
+      title: 'Undo Import',
+      description:
+        'Delete the transactions from one import batch. Uses the local import log and any transaction whose note still contains that ml-batch marker. Requires confirm: true. Set deleteRelated: true to also delete a transfer’s other leg. dryRun lists the ids and does not delete them.',
+      inputSchema: {
+        batchId: z.string().min(4).max(80).describe('batchId returned by add_transactions or import_transactions_csv.'),
+        deleteRelated: z.boolean().optional().describe('Also delete related transfer legs. Default false.'),
+        confirm: confirmArgument,
+        dryRun: dryRunArgument
+      }
+    },
+    guard(async ({ batchId, deleteRelated, confirm, dryRun }) => {
+      assertConfirm({ confirm, dryRun, action: 'delete this import batch' });
+      const id = assertBatchId(batchId);
+      return runWithClient(undefined, (client) =>
+        undoImport(client, id, { deleteRelated: deleteRelated === true, dryRun: dryRun === true })
+      );
+    })
+  );
+
+  server.registerTool(
+    'get_budgets',
+    {
+      title: 'Get Budgets',
+      description:
+        'List budgets. Pass walletId to call /budget/list/{walletId}. Omit it to call /budget/list/all. finished filters the all-wallets call with isFinished.',
+      inputSchema: {
+        walletId: z.string().min(1).optional(),
+        finished: z.boolean().optional().describe('When set, sent as isFinished on /budget/list/all.')
+      }
+    },
+    guard(({ walletId, finished }) => runWithClient(undefined, (client) => client.getBudgets({ walletId, finished })))
+  );
+
+  server.registerTool(
+    'add_budget',
+    {
+      title: 'Add Budget',
+      description:
+        'Create a budget via /budget/add with walletId, categoryId, amount, startDate, endDate, and isRepeat. Accounts tagged user_category_v2 cannot change budgets. dryRun previews the payload.',
+      inputSchema: {
+        ...walletIdArgument,
+        categoryId: z.string().min(1),
+        amount: amountArgument,
+        startDate: dateArgument,
+        endDate: dateArgument,
+        isRepeat: z.boolean().optional().describe('Repeat the budget. Default false.'),
+        dryRun: dryRunArgument
+      }
+    },
+    guard((params) => runWithClient(undefined, (client) => client.addBudget(params)))
+  );
+
+  server.registerTool(
+    'edit_budget',
+    {
+      title: 'Edit Budget',
+      description:
+        'Update a budget via /budget/edit. The web app sends budgetId, walletId, categoryId, amount, startDate, endDate, and isRepeat. dryRun previews the payload.',
+      inputSchema: {
+        budgetId: z.string().min(1),
+        ...walletIdArgument,
+        categoryId: z.string().min(1).optional(),
+        amount: amountArgument,
+        startDate: dateArgument,
+        endDate: dateArgument,
+        isRepeat: z.boolean().optional(),
+        dryRun: dryRunArgument
+      }
+    },
+    guard((params) => runWithClient(undefined, (client) => client.editBudget(params)))
+  );
+
+  server.registerTool(
+    'delete_budget',
+    {
+      title: 'Delete Budget',
+      description:
+        'Delete a budget via /budget/delete. typeDelete "only" removes this occurrence and "all" removes the repeating series. Requires confirm: true.',
+      inputSchema: {
+        budgetId: z.string().min(1),
+        typeDelete: z.enum(['only', 'all']).optional().describe('only (default) or all for a repeating budget.'),
+        confirm: confirmArgument,
+        dryRun: dryRunArgument
+      }
+    },
+    guard(async ({ budgetId, typeDelete, confirm, dryRun }) => {
+      assertConfirm({ confirm, dryRun, action: 'delete this budget' });
+      return runWithClient(undefined, (client) =>
+        client.deleteBudget(budgetId, { typeDelete, dryRun: dryRun === true })
+      );
+    })
+  );
+
+  server.registerTool(
+    'get_report',
+    {
+      title: 'Get Report',
+      description:
+        'Period report via /report/{walletId}. The web app posts startDate and endDate and treats get_report_success as success. Pass walletId "all" for the combined report. The response shape was not checked against a live account.',
+      inputSchema: {
+        walletId: z.string().min(1).describe('Wallet id, or "all".'),
+        startDate: dateArgument,
+        endDate: dateArgument,
+        walletIds: z.array(z.string().min(1)).optional().describe('Optional wallet id list for a combined report.')
+      }
+    },
+    guard((params) => runWithClient(undefined, (client) => client.getReport(params)))
+  );
 };
 
 export const createMoneyloverServer = () => {
@@ -1167,6 +1511,7 @@ export const __test = {
   clearEnvTokenCache: () => {
     cachedEnvEmail = '';
     cachedEnvToken = '';
+    cachedRefreshToken = '';
     envTokenPromise = null;
     cacheLoaded = false;
     cachedEnvUsesDirectToken = false;
