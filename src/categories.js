@@ -129,10 +129,56 @@ const filterByDirection = (categories, direction) => {
   return categories.filter((category) => Number(category.type) === expected);
 };
 
+export const CATEGORY_NOT_USABLE = 'CATEGORY_NOT_USABLE';
+
+const categoryError = (message, code) => {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+};
+
+/**
+ * /category/list-all repeats the same `_id` on many wallets. The row for this
+ * write is the pair (account === walletId, _id), not the first copy of `_id`.
+ */
+export const findCategoryForWallet = (rows, walletId, id) =>
+  (Array.isArray(rows) ? rows : []).find((category) => category?._id === id && accountOf(category) === walletId) ??
+  null;
+
+/**
+ * Why a /category/list row is absent from the add picker.
+ * The website's Add Transaction picker is POST /category/list-all filtered by
+ * account === wallet. The bundle also drops IS_UNCATEGORIZED_* from that response.
+ * It does not consult an isDelete flag on categories (that flag is on wallets).
+ * A stored row is unusable when no list-all row for this wallet matches it.
+ */
+export const unusableCategoryReason = (category, walletId) => {
+  const account = accountOf(category);
+  if (account && walletId && account !== walletId) {
+    return 'different_wallet';
+  }
+  const metadata = metadataKey(category?.metadata);
+  if (metadata === 'IS_UNCATEGORIZED_EXPENSE' || metadata === 'IS_UNCATEGORIZED_INCOME') {
+    return 'uncategorized';
+  }
+  for (const key of ['isDelete', 'isDeleted', 'deleted', 'is_delete']) {
+    const value = category?.[key];
+    if (value === true || value === 1 || value === '1' || value === 'true') {
+      return 'deleted';
+    }
+  }
+  if (category?.hidden === true || category?.isHidden === true || category?.archived === true) {
+    return 'hidden';
+  }
+  return 'not_in_list_all';
+};
+
 /**
  * Pick a category for one wallet.
- * The wallet's own list is the authority. An id on that list is sent as-is.
- * An id that another wallet owns is rejected. A name is matched only inside this wallet.
+ * Names and add ids come from the usable list (POST /category/list-all rows for
+ * this wallet). The same add id may also exist on other wallets; only this
+ * wallet's row is selected. A stored /category/list id that is not in the
+ * picker is returned as source "wallet" so the caller can map or refuse it.
  * Nothing falls back to a category named Others or Other expense.
  */
 export const selectCategory = (walletList, globalList, walletId, { categoryId, categoryName, direction } = {}) => {
@@ -142,20 +188,23 @@ export const selectCategory = (walletList, globalList, walletId, { categoryId, c
   const globalRows = Array.isArray(globalList) ? globalList : [];
 
   if (id) {
-    const walletHit = walletRows.find((category) => category._id === id);
+    const addHit = findCategoryForWallet(globalRows, walletId, id);
+    if (addHit) {
+      return { category: addHit, id: addHit._id, source: 'list-all' };
+    }
+
+    const walletHit = walletRows.find((category) => category._id === id && belongsToWallet(category, walletId));
     if (walletHit) {
-      if (!belongsToWallet(walletHit, walletId)) {
-        throw new Error('Category belongs to a different wallet');
-      }
       return { category: walletHit, id: walletHit._id, source: 'wallet' };
     }
 
-    const globalHit = globalRows.find((category) => category._id === id);
-    if (globalHit) {
-      if (!belongsToWallet(globalHit, walletId)) {
-        throw new Error('Category belongs to a different wallet');
-      }
-      return { category: globalHit, id: globalHit._id, source: 'global' };
+    const elsewhere = [...globalRows, ...walletRows].some(
+      (category) => category?._id === id && accountOf(category) && accountOf(category) !== walletId
+    );
+    if (elsewhere && !name) {
+      throw new Error(
+        'Category belongs to a different wallet. The same add id can appear on several wallets; pass the wallet you are writing to.'
+      );
     }
     if (!name) {
       return { category: null, id, source: 'passthrough' };
@@ -167,23 +216,35 @@ export const selectCategory = (walletList, globalList, walletId, { categoryId, c
     throw new Error('categoryId or category is required');
   }
 
-  const named = walletRows.filter(
-    (category) =>
-      belongsToWallet(category, walletId) &&
-      (category._id === label || String(category.name ?? '').toLowerCase() === label.toLowerCase())
-  );
-  const filtered = filterByDirection(named, direction);
-  if (filtered.length === 1) {
-    return { category: filtered[0], id: filtered[0]._id, source: 'wallet-name' };
+  const nameMatches = (rows) =>
+    rows.filter(
+      (category) => category._id === label || String(category.name ?? '').toLowerCase() === label.toLowerCase()
+    );
+  const usable = globalRows.filter((category) => accountOf(category) === walletId);
+  const usableNamed = filterByDirection(nameMatches(usable), direction);
+  if (usableNamed.length === 1) {
+    return { category: usableNamed[0], id: usableNamed[0]._id, source: 'list-all' };
   }
-  if (filtered.length === 0) {
-    const hint = direction ? ` (${direction})` : '';
-    throw new Error(`No category named "${label}"${hint} in this wallet`);
+  if (usableNamed.length > 1) {
+    const candidates = usableNamed.map((category) => candidateLabel(category)).join(', ');
+    throw new Error(
+      `Category name "${label}" matches more than one category in this wallet's add picker. Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
+    );
   }
-  const candidates = filtered.map((category) => candidateLabel(category)).join(', ');
-  throw new Error(
-    `Category name "${label}" matches more than one category in this wallet. Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
+
+  const storedNamed = filterByDirection(
+    nameMatches(walletRows.filter((category) => belongsToWallet(category, walletId))),
+    direction
   );
+  if (storedNamed.length > 0) {
+    const reason = unusableCategoryReason(storedNamed[0], walletId);
+    throw categoryError(
+      `Category "${label}" is on this wallet's stored list (${storedNamed[0]._id}) but not in the add picker. Reason: ${reason}. The website only offers /category/list-all categories for this wallet. Nothing was posted.`,
+      CATEGORY_NOT_USABLE
+    );
+  }
+  const hint = direction ? ` (${direction})` : '';
+  throw new Error(`No category named "${label}"${hint} in this wallet`);
 };
 
 const parentIdOf = (category) => {

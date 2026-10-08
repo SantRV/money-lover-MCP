@@ -55,8 +55,8 @@ describe('createTransactions', () => {
   it('creates the first row and skips the second copy in the same batch', async () => {
     global.fetch
       .mockResolvedValueOnce(json({ transactions: [] }))
-      .mockResolvedValueOnce(json(walletCategories))
       .mockResolvedValueOnce(json(globalCategories))
+      .mockResolvedValueOnce(json(walletCategories))
       .mockResolvedValueOnce(json({ _id: 'created-1' }));
 
     const summary = await createTransactions(new MoneyloverClient('token', { timeZone: 'Australia/Adelaide' }), {
@@ -77,7 +77,7 @@ describe('createTransactions', () => {
   });
 
   it('previews a batch without posting', async () => {
-    global.fetch.mockResolvedValueOnce(json(walletCategories)).mockResolvedValueOnce(json(globalCategories));
+    global.fetch.mockResolvedValueOnce(json(globalCategories)).mockResolvedValueOnce(json(walletCategories));
 
     const summary = await createTransactions(new MoneyloverClient('token'), {
       walletId: 'w1',

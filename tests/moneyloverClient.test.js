@@ -289,7 +289,7 @@ describe('MoneyloverClient', () => {
       global.fetch.mockResolvedValueOnce(
         allCatsOk([
           {
-            _id: 'FBD2B817A8DE4AE0B8BF8261006DCEC5',
+            _id: 'B012AA1D774D42B6A4C68A84B5977C4C',
             account: '02A5827C5E434413B790F55D1EF7AF49',
             name: 'Bank fees',
             type: 2
@@ -299,7 +299,7 @@ describe('MoneyloverClient', () => {
       global.fetch.mockResolvedValueOnce(
         allCatsOk([
           {
-            _id: 'B012AA1D774D42B6A4C68A84B5977C4C',
+            _id: 'FBD2B817A8DE4AE0B8BF8261006DCEC5',
             account: '02A5827C5E434413B790F55D1EF7AF49',
             name: 'Bank fees',
             type: 2
@@ -317,8 +317,8 @@ describe('MoneyloverClient', () => {
       });
       expect(data).toEqual({ _id: 'web519aed' });
       expect(global.fetch).toHaveBeenCalledTimes(3);
-      expect(global.fetch.mock.calls[0][0]).toBe('https://web.moneylover.me/api/category/list');
-      expect(global.fetch.mock.calls[1][0]).toBe('https://web.moneylover.me/api/category/list-all');
+      expect(global.fetch.mock.calls[0][0]).toBe('https://web.moneylover.me/api/category/list-all');
+      expect(global.fetch.mock.calls[1][0]).toBe('https://web.moneylover.me/api/category/list');
       const [url, options] = global.fetch.mock.calls[2];
       expect(url).toBe('https://web.moneylover.me/api/transaction/add');
       expect(options.method).toBe('POST');
@@ -350,10 +350,10 @@ describe('MoneyloverClient', () => {
 
     it('sends the list-all id when the caller already has it', async () => {
       global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'stored', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
-      );
-      global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'add-id', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+        allCatsOk([
+          { _id: 'add-id', account: 'w1', name: 'Food', metadata: 'food0', type: 2 },
+          { _id: 'add-id', account: 'w9', name: 'Food', metadata: 'food0', type: 2 }
+        ])
       );
       global.fetch.mockResolvedValueOnce(ok({ _id: 'new-txn' }));
 
@@ -364,16 +364,18 @@ describe('MoneyloverClient', () => {
         date: '2026-04-18',
         note: 'test'
       });
-      const body = JSON.parse(global.fetch.mock.calls[2][1].body);
+      expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/category/list'))).toBe(false);
+      const body = JSON.parse(global.fetch.mock.calls[1][1].body);
       expect(body.category).toBe('add-id');
+      expect(body.account).toBe('w1');
       expect(body.amount).toBe(5000);
     });
 
     it('does not post when this wallet has no list-all category for the stored id', async () => {
+      global.fetch.mockResolvedValueOnce(allCatsOk([{ _id: 'other-wallet', account: 'w9', name: 'Food', type: 2 }]));
       global.fetch.mockResolvedValueOnce(
         allCatsOk([{ _id: 'stored', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
       );
-      global.fetch.mockResolvedValueOnce(allCatsOk([{ _id: 'other-wallet', account: 'w9', name: 'Food', type: 2 }]));
 
       await expect(
         new MoneyloverClient('t').addTransaction({
@@ -382,16 +384,16 @@ describe('MoneyloverClient', () => {
           amount: '1',
           date: '2026-04-18'
         })
-      ).rejects.toThrow(/list-all/);
+      ).rejects.toMatchObject({ code: 'CATEGORY_NOT_USABLE' });
       expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
     });
 
     it('sends reminder, location, event, and exclude-from-report when they are set', async () => {
       global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'cat-w1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+        allCatsOk([{ _id: 'cat-add', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
       );
       global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'cat-add', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+        allCatsOk([{ _id: 'cat-w1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
       );
       global.fetch.mockResolvedValueOnce(ok({ _id: 'new-txn' }));
 
@@ -445,9 +447,6 @@ describe('MoneyloverClient', () => {
       global.fetch.mockResolvedValueOnce(
         allCatsOk([{ _id: 'cat-g1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
       );
-      global.fetch.mockResolvedValueOnce(
-        allCatsOk([{ _id: 'cat-g1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
-      );
       global.fetch.mockResolvedValueOnce(ok({ _id: 'new-txn' }));
 
       const adelaideEvening = new Date('2026-04-17T15:00:00.000Z');
@@ -458,7 +457,7 @@ describe('MoneyloverClient', () => {
         date: adelaideEvening,
         note: 'Cafe'
       });
-      const body = JSON.parse(global.fetch.mock.calls[2][1].body);
+      const body = JSON.parse(global.fetch.mock.calls[1][1].body);
       expect(body.amount).toBe(12.5);
       expect(body.displayDate).toBe('2026-04-18');
     });

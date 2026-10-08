@@ -589,7 +589,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Get Categories',
       description:
-        'Categories for one wallet. Each wallet has its own tree, including parent and sub-categories, and some wallets have no Other expense category. type 1 is income and type 2 is expense. systemLabel names a built-in category when that metadata is present. Use the id from this wallet with add_transaction. Do not reuse a category id from another wallet, and do not assume a default Others category exists.',
+        'Raw POST /category/list for one wallet. This catalogue is larger than the add form: it includes categories the website picker does not offer. Use list_categories for ids that add_transaction can send. type 1 is income and type 2 is expense.',
       inputSchema: walletIdArgument,
       outputSchema: {
         categories: z.array(z.record(z.any()))
@@ -610,14 +610,26 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'List Categories',
       description:
-        'Compact category list for one wallet, grouped into income (type 1) and expense (type 2), including parentId when the category is a sub-category. id is the stored category id. addId, when present, is the /category/list-all id the website posts on /transaction/add for this wallet. add_transaction accepts either id and sends addId. The same name in another wallet is a different category. Some wallets have no Other expense category.',
-      inputSchema: walletIdArgument
+        'Categories the website add form offers for one wallet: POST /category/list-all rows with account equal to this wallet. id and addId are the id to send on /transaction/add. The same add id can appear on other wallets; pair it with this walletId. Set includeUnusable to also list stored /category/list rows the picker does not offer, each with a reason. Some wallets have no Other expense category.',
+      inputSchema: {
+        ...walletIdArgument,
+        includeUnusable: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, also return stored /category/list rows that are not in the add picker, with reason and code CATEGORY_NOT_USABLE. Default false.'
+          )
+      }
     },
-    guard(async ({ walletId }) => {
-      const categories = await runWithClient(undefined, (client) => client.listWalletCategories(walletId));
+    guard(async ({ walletId, includeUnusable }) => {
+      const listed = await runWithClient(undefined, (client) =>
+        client.listWalletCategories(walletId, { includeUnusable: includeUnusable === true })
+      );
+      const categories = listed.categories;
       const project = (category) => ({
         id: category.id,
-        ...(category.addId ? { addId: category.addId } : {}),
+        addId: category.addId,
+        ...(category.storedId ? { storedId: category.storedId } : {}),
         name: category.name,
         type: category.type,
         typeName: category.typeName,
@@ -626,12 +638,25 @@ const registerMoneyloverTools = (server) => {
         parentId: category.parentId,
         walletId: category.walletId
       });
-      return {
+      const result = {
         walletId,
-        categories,
+        categories: categories.map(project),
         income: categories.filter((category) => category.typeName === 'income').map(project),
         expense: categories.filter((category) => category.typeName === 'expense').map(project)
       };
+      if (includeUnusable === true) {
+        result.unusable = listed.unusable.map((category) => ({
+          id: category.id,
+          name: category.name,
+          type: category.type,
+          typeName: category.typeName,
+          metadata: category.metadata,
+          walletId: category.walletId,
+          reason: category.reason,
+          code: category.code
+        }));
+      }
+      return result;
     })
   );
 
@@ -674,7 +699,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Transaction',
       description:
-        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2) from this wallet. categoryId may be the stored id from list_categories or the addId from /category/list-all for this wallet; the posted category is the list-all id. category may be a name that is unique in this wallet. date YYYY-MM-DD is not timezone-shifted. Optional fields match the website form: with, reminder, location, event, an existing photo reference, and exclude from report. This server does not upload a photo file. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
+        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2) from list_categories for this wallet. categoryId is that add id. The same add id may exist on other wallets; walletId selects the row. A stored catalogue id or name that the add picker does not offer is refused with CATEGORY_NOT_USABLE and nothing is posted. date YYYY-MM-DD is not timezone-shifted. Optional fields match the website form: with, reminder, location, event, an existing photo reference, and exclude from report. This server does not upload a photo file. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
       inputSchema: {
         ...walletIdArgument,
         categoryId: z
@@ -682,7 +707,7 @@ const registerMoneyloverTools = (server) => {
           .min(1)
           .optional()
           .describe(
-            'Stored category id from list_categories, or the addId from /category/list-all for this wallet. The request sends the list-all id.'
+            'Add id from list_categories for this wallet. A stored /category/list id is accepted only when it maps to an add-picker row. The same add id may exist on other wallets; walletId selects which row.'
           ),
         category: z
           .string()
@@ -957,7 +982,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Get All Categories',
       description:
-        'Categories across the user wallets, with typeName. Prefer list_categories for a single wallet. The response is paged and, when category records include an account id, limited to wallets this user can see. total and truncated say whether the page is complete.',
+        'The add-picker catalogue from POST /category/list-all, fetched once per process and reused. The same _id can appear under many wallets; rows are not collapsed. Prefer list_categories for one wallet. The response is paged. total and truncated say whether the page is complete.',
       inputSchema: {
         limit: z.number().int().min(1).max(1000).optional().describe('Page size. Default 200.'),
         offset: z.number().int().min(0).optional().describe('Number of categories to skip.')
@@ -1469,7 +1494,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Transfer Money',
       description:
-        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Outgoing transfer, Incoming transfer, and Other expense are used only when that metadata exists on that wallet. If it does not, pass fromCategoryId, toCategoryId, or feeCategoryId from that wallet’s list. There is no default Others category. dryRun previews the legs.',
+        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Outgoing transfer, Incoming transfer, and Other expense are used only when that metadata is in the add picker for that wallet (list_categories). A stored catalogue row that the picker does not offer is refused with CATEGORY_NOT_USABLE. If the picker has no matching category, pass fromCategoryId, toCategoryId, or feeCategoryId from list_categories. dryRun previews the legs.',
       inputSchema: {
         fromWalletId: z.string().min(1),
         toWalletId: z.string().min(1),
@@ -1514,7 +1539,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Adjust Balance',
       description:
-        'Set a wallet balance by adding one transaction for the difference. When the balance must rise, the category is this wallet’s Other income category. When it must fall, it is this wallet’s Other expense category. Those are used only when that metadata exists on this wallet. If it does not, pass categoryId from list_categories for this wallet. There is no default Others category. dryRun previews the transaction.',
+        'Set a wallet balance by adding one transaction for the difference. When the balance must rise, the category is this wallet’s Other income category in the add picker. When it must fall, it is this wallet’s Other expense category in the add picker. A stored Other expense row that list_categories does not return is refused with CATEGORY_NOT_USABLE. Pass categoryId from list_categories when the picker has no Other expense or Other income. dryRun previews the transaction.',
       inputSchema: {
         ...walletIdArgument,
         balance: z.union([z.number(), z.string()]).describe('The balance the wallet should show after the adjustment.'),

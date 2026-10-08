@@ -1,5 +1,6 @@
 import { prepareAmount, amountCents, formatAmount, parseAmount, wireAmount } from './amounts.js';
 import {
+  CATEGORY_NOT_USABLE,
   CategoryType,
   categoryIdForAdd,
   coerceCategoryType,
@@ -7,6 +8,7 @@ import {
   selectCategory,
   summarizeCategory,
   systemCategoryLabel,
+  unusableCategoryReason,
   unwrapList
 } from './categories.js';
 import { addCalendarDays, calendarDate, safeCalendarDate } from './dates.js';
@@ -103,11 +105,27 @@ const nestedId = (value) => {
 
 const copyText = (value) => (value == null ? '' : String(value));
 
-const resolutionWarning = (source) => {
-  if (source === 'passthrough') {
-    return 'Category id was not found on this wallet. It was sent unchanged. Pass a category id from list_categories for this wallet.';
+const notUsableError = (label, reason) => {
+  const why = {
+    not_in_list_all:
+      'It is on the stored /category/list catalogue. The website add picker is /category/list-all for this wallet, and this category is not in it.',
+    uncategorized: 'The website drops uncategorized categories from the add picker.',
+    deleted: 'It is marked deleted on the stored category list.',
+    hidden: 'It is hidden or archived on the stored category list.',
+    different_wallet:
+      'It belongs to a different wallet. The same add id can appear on several wallets; pass the wallet you are writing to.'
+  };
+  return new MoneyloverApiError(
+    `${label} cannot be used for a new transaction. ${why[reason] ?? 'It is not in the add picker.'} Nothing was posted.`,
+    { code: CATEGORY_NOT_USABLE }
+  );
+};
+
+const rethrowCategoryError = (error) => {
+  if (error?.code === CATEGORY_NOT_USABLE) {
+    throw new MoneyloverApiError(error.message, { code: CATEGORY_NOT_USABLE });
   }
-  return null;
+  throw error;
 };
 
 const photoReference = (image) => {
@@ -424,25 +442,41 @@ export class MoneyloverClient {
   }
 
   async getAllCategories() {
-    return this.#post('/category/list-all');
+    return this.#globalCategories();
   }
 
-  async listWalletCategories(walletId) {
-    const categories = await this.#walletCategories(walletId);
-    let addRows = [];
-    try {
-      addRows = listAllCategoriesForWallet(await this.#globalCategories(), walletId);
-    } catch {
-      addRows = [];
-    }
-    return categories.map((category) => {
+  async listWalletCategories(walletId, { includeUnusable = false } = {}) {
+    const id = ensureString(walletId, 'walletId');
+    const addRows = listAllCategoriesForWallet(await this.#globalCategories(), id);
+    const categories = addRows.map((category) => {
       const summary = summarizeCategory(category);
-      const mapped = categoryIdForAdd({ category, id: category._id }, addRows);
-      if (mapped?.id) {
-        summary.addId = mapped.id;
-      }
+      summary.addId = category._id;
+      summary.usable = true;
       return summary;
     });
+    if (!includeUnusable) {
+      return { categories, unusable: [] };
+    }
+    const stored = await this.#walletCategories(id);
+    const unusable = [];
+    for (const category of stored) {
+      const mapped = categoryIdForAdd({ category, id: category._id }, addRows);
+      if (mapped?.id) {
+        const hit = categories.find((row) => row.addId === mapped.id && !row.storedId);
+        if (hit) {
+          hit.storedId = category._id;
+        }
+        continue;
+      }
+      const reason = unusableCategoryReason(category, id);
+      unusable.push({
+        ...summarizeCategory(category),
+        usable: false,
+        reason,
+        code: CATEGORY_NOT_USABLE
+      });
+    }
+    return { categories, unusable };
   }
 
   async addCategory(params) {
@@ -461,7 +495,9 @@ export class MoneyloverClient {
     try {
       const created = await this.#postJson('/category/add', payload);
       this.#walletCategoryCache.delete(payload.walletId);
+      sessionCategories.delete(payload.walletId);
       this.#globalCategoriesCache = null;
+      sessionGlobalCategories = undefined;
       return created;
     } catch (error) {
       throw await this.#explainWriteError(error, 'category');
@@ -509,7 +545,9 @@ export class MoneyloverClient {
     try {
       const merged = await this.#postJson('/category/merge', payload);
       this.#walletCategoryCache.clear();
+      sessionCategories.clear();
       this.#globalCategoriesCache = null;
+      sessionGlobalCategories = undefined;
       return merged;
     } catch (error) {
       throw await this.#explainWriteError(error, 'category');
@@ -547,30 +585,52 @@ export class MoneyloverClient {
       this.#globalCategoriesCache = sessionGlobalCategories;
       return sessionGlobalCategories;
     }
-    const list = unwrapList(await this.getAllCategories());
+    const list = unwrapList(await this.#post('/category/list-all'));
     this.#globalCategoriesCache = list;
     sessionGlobalCategories = list;
     return list;
   }
 
   async #resolveCategory(walletId, { categoryId, categoryName, direction }) {
-    const walletList = await this.#walletCategories(walletId);
     const addRows = listAllCategoriesForWallet(await this.#globalCategories(), walletId);
-    const selected = selectCategory(walletList, addRows, walletId, { categoryId, categoryName, direction });
+    const id = typeof categoryId === 'string' ? categoryId.trim() : '';
+    const name = typeof categoryName === 'string' ? categoryName.trim() : '';
+    if ((id && addRows.some((category) => category._id === id)) || (!id && name)) {
+      try {
+        const selected = selectCategory([], addRows, walletId, { categoryId, categoryName, direction });
+        if (selected.source === 'list-all') {
+          return { category: selected.category, id: selected.id, source: 'list-all' };
+        }
+      } catch (error) {
+        if (id || error?.code === CATEGORY_NOT_USABLE || !/No category named/.test(error?.message ?? '')) {
+          rethrowCategoryError(error);
+        }
+      }
+    }
+    const walletList = await this.#walletCategories(walletId);
+    let selected;
+    try {
+      selected = selectCategory(walletList, addRows, walletId, { categoryId, categoryName, direction });
+    } catch (error) {
+      rethrowCategoryError(error);
+    }
+    if (selected.source === 'list-all') {
+      return { category: selected.category, id: selected.id, source: 'list-all' };
+    }
     const mapped = categoryIdForAdd(selected, addRows);
+    const label = selected.category?.name
+      ? `${selected.category.name} [${selected.id}]`
+      : selected.id || categoryName || 'this category';
     if (!mapped?.id) {
-      const label = selected.category?.name
-        ? `${selected.category.name} [${selected.id}]`
-        : selected.id || categoryName || 'this category';
       if (mapped?.ambiguous) {
         const candidates = mapped.candidates.map((category) => `${category.name} [${category._id}]`).join(', ');
-        throw new Error(
-          `More than one /category/list-all category matches ${label} in this wallet. POST /transaction/add needs one of those ids. Candidates: ${candidates}`
+        throw new MoneyloverApiError(
+          `More than one add-picker category matches ${label} in this wallet. Pass one of those ids. Candidates: ${candidates}`,
+          { code: CATEGORY_NOT_USABLE }
         );
       }
-      throw new Error(
-        `No /category/list-all category for this wallet matches ${label}. The website posts that id on /transaction/add, and list_categories shows the id the server stores afterwards. Nothing was posted.`
-      );
+      const reason = selected.category ? unusableCategoryReason(selected.category, walletId) : 'not_in_list_all';
+      throw notUsableError(label, reason);
     }
     return {
       category: selected.category ?? mapped.category,
@@ -610,10 +670,6 @@ export class MoneyloverClient {
     });
     const amount = prepareAmount(rawAmount, resolved.category?.type, { amountMode });
     const warnings = [...amount.warnings];
-    const warning = resolutionWarning(resolved.source);
-    if (warning) {
-      warnings.push(warning);
-    }
     if (amount.direction !== 'unknown' && direction && amount.direction !== direction) {
       warnings.push(
         `Amount sign implies ${direction}, but the category is ${amount.direction}. The category type is what Money Lover will use.`
@@ -710,10 +766,6 @@ export class MoneyloverClient {
         categoryName: params.category
       });
       categoryId = resolved.id;
-      const warning = resolutionWarning(resolved.source);
-      if (warning) {
-        warnings.push(warning);
-      }
     }
     if (!categoryId) {
       throw new Error('categoryId is required when the existing transaction has no category');
@@ -919,28 +971,24 @@ export class MoneyloverClient {
       const resolved = await this.#resolveCategory(walletId, { categoryId: explicitId });
       return resolved.id;
     }
-    const walletList = await this.#walletCategories(walletId);
-    const matches = walletList.filter((category) => {
-      if (String(category.metadata ?? '') !== metadata) {
-        return false;
-      }
-      const account = category.account ?? category.walletId ?? '';
-      return account === '' || account === walletId;
-    });
+    const matches = listAllCategoriesForWallet(await this.#globalCategories(), walletId).filter(
+      (category) => String(category.metadata ?? '') === metadata
+    );
     const label = systemCategoryLabel(metadata) ?? metadata;
     if (matches.length === 0) {
-      throw new Error(
-        `Wallet ${walletId} has no "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Do not assume a default Others category exists.`
+      throw new MoneyloverApiError(
+        `Wallet ${walletId} has no usable "${label}" category (${metadata}) in the add picker. list_categories returns that picker. A stored /category/list row with this metadata is not sent. Do not assume Other expense exists.`,
+        { code: CATEGORY_NOT_USABLE }
       );
     }
     if (matches.length > 1) {
       const candidates = matches.map((category) => `${category.name} [${category._id}]`).join(', ');
-      throw new Error(
-        `Wallet ${walletId} has more than one "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
+      throw new MoneyloverApiError(
+        `Wallet ${walletId} has more than one usable "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`,
+        { code: CATEGORY_NOT_USABLE }
       );
     }
-    const resolved = await this.#resolveCategory(walletId, { categoryId: matches[0]._id });
-    return resolved.id;
+    return matches[0]._id;
   }
 
   async transferMoney(params) {

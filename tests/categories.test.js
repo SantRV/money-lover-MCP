@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { categoryIdForAdd, categoryTypeName, selectCategory, summarizeCategory } from '../src/categories.js';
+import {
+  categoryIdForAdd,
+  categoryTypeName,
+  selectCategory,
+  summarizeCategory,
+  unusableCategoryReason
+} from '../src/categories.js';
 
 describe('categories', () => {
   const wallet = [
@@ -37,20 +43,60 @@ describe('categories', () => {
     expect(resolved.source).toBe('wallet');
   });
 
-  it('resolves a name only inside this wallet', () => {
+  it('resolves a name from the add picker for this wallet', () => {
     const resolved = selectCategory(
       [...wallet, { _id: 'w9-pay', name: 'Salary', type: 1, account: 'w9', metadata: 'salary0' }],
       global,
       'w1',
       { categoryName: 'salary', direction: 'income' }
     );
-    expect(resolved.id).toBe('local-pay');
-    expect(resolved.source).toBe('wallet-name');
+    expect(resolved.id).toBe('global-pay');
+    expect(resolved.source).toBe('list-all');
+  });
+
+  it('selects the shared add id that belongs to this wallet', () => {
+    const shared = 'B012AA1D774D42B6A4C68A84B5977C4C';
+    const resolved = selectCategory(
+      [],
+      [
+        { _id: shared, name: 'Bank fees', type: 2, account: 'other-wallet' },
+        { _id: shared, name: 'Bank fees', type: 2, account: 'w1' }
+      ],
+      'w1',
+      { categoryId: shared }
+    );
+    expect(resolved.id).toBe(shared);
+    expect(resolved.category.account).toBe('w1');
+  });
+
+  it('refuses a stored name that the add picker does not offer', () => {
+    expect(() =>
+      selectCategory(
+        [{ _id: '30BC0A0E515245EBAC29F55BAFDA1780', name: 'Other Expense', type: 2, account: 'w1' }],
+        [],
+        'w1',
+        { categoryName: 'Other Expense' }
+      )
+    ).toThrow(/CATEGORY_NOT_USABLE|not in the add picker/);
+  });
+
+  it('names why a stored category is unusable', () => {
+    expect(unusableCategoryReason({ metadata: 'IS_UNCATEGORIZED_EXPENSE', account: 'w1' }, 'w1')).toBe('uncategorized');
+    expect(unusableCategoryReason({ isDelete: true, account: 'w1', name: 'Old' }, 'w1')).toBe('deleted');
+    expect(unusableCategoryReason({ account: 'w9', name: 'Food' }, 'w1')).toBe('different_wallet');
+    expect(
+      unusableCategoryReason({ _id: '30BC0A0E515245EBAC29F55BAFDA1780', name: 'Other Expense', account: 'w1' }, 'w1')
+    ).toBe('not_in_list_all');
   });
 
   it('does not use another wallet when the name is missing here', () => {
     expect(() =>
-      selectCategory([{ _id: 'w9-food', name: 'Food', type: 2, account: 'w9' }], global, 'w1', { categoryName: 'Food' })
+      selectCategory(
+        [{ _id: 'w9-food', name: 'Food', type: 2, account: 'w9' }],
+        [{ _id: 'w9-add', name: 'Food', type: 2, account: 'w9' }],
+        'w1',
+        { categoryName: 'Food' }
+      )
     ).toThrow(/No category named "Food"/);
   });
 
@@ -59,7 +105,7 @@ describe('categories', () => {
       { _id: 'g1', name: 'Groceries', type: 2, account: 'w1', parent: { _id: 'p1', name: 'Food' } },
       { _id: 'g2', name: 'Groceries', type: 2, account: 'w1', parent: { _id: 'p2', name: 'Household' } }
     ];
-    expect(() => selectCategory(tree, [], 'w1', { categoryName: 'Groceries' })).toThrow(
+    expect(() => selectCategory([], tree, 'w1', { categoryName: 'Groceries' })).toThrow(
       /Food \/ Groceries \[g1\].*Household \/ Groceries \[g2\]/
     );
   });

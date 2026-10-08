@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -139,6 +139,8 @@ describe('phase 2 API behaviour', () => {
       date: '2026-04-18'
     });
 
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/category/list'))).toBe(false);
     const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add-multi'));
     const body = JSON.parse(post[1].body);
     expect(body.action).toBe('transfermoney');
@@ -201,7 +203,7 @@ describe('phase 2 API behaviour', () => {
 
     await expect(
       new MoneyloverClient('t').adjustBalance({ walletId: 'w1', balance: 50, date: '2026-04-18' })
-    ).rejects.toThrow(/categoryId/);
+    ).rejects.toMatchObject({ code: 'CATEGORY_NOT_USABLE' });
     expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
 
@@ -339,8 +341,8 @@ describe('phase 2 API behaviour', () => {
   it('fails HTTP 524 once, with the explanation in the error text', async () => {
     global.fetch = vi
       .fn()
-      .mockResolvedValueOnce(json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]))
       .mockResolvedValueOnce(json([{ _id: 'cat-add', account: 'w1', name: 'Food', type: 2 }]))
+      .mockResolvedValueOnce(json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]))
       .mockResolvedValueOnce(new Response('error code: 524', { status: 524 }));
 
     const error = await new MoneyloverClient('t', { requestTimeout: 150000 })
@@ -380,5 +382,49 @@ describe('phase 2 API behaviour', () => {
     expect(first.payload.category).toBe('cat-add');
     expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list'))).toHaveLength(1);
     expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
+  });
+
+  it('lists add-picker categories and keeps one list-all fetch for the process', async () => {
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/category-picker.json', import.meta.url), 'utf8'));
+    const shared = 'B012AA1D774D42B6A4C68A84B5977C4C';
+    global.fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/category/list-all')) {
+        return json(fixture.listAll);
+      }
+      if (path.endsWith('/category/list')) {
+        return json(fixture.storedOrdi);
+      }
+      return json({});
+    });
+
+    const first = await new MoneyloverClient('t').listWalletCategories('ordi');
+    const second = await new MoneyloverClient('t').listWalletCategories('tulip');
+    expect(first.categories.map((category) => category.addId)).toEqual([shared, '800FD392', '30160C1B']);
+    expect(first.unusable).toEqual([]);
+    expect(second.categories.map((category) => category.name)).toEqual(['Bank fees']);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/category/list'))).toBe(false);
+
+    const full = await new MoneyloverClient('t').listWalletCategories('ordi', { includeUnusable: true });
+    expect(full.categories.find((category) => category.name === 'Bank fees').storedId).toBe(
+      'FBD2B817A8DE4AE0B8BF8261006DCEC5'
+    );
+    expect(full.unusable.map((category) => [category.name, category.reason, category.code])).toEqual([
+      ['Other Expense', 'not_in_list_all', 'CATEGORY_NOT_USABLE'],
+      ['Old coffee', 'deleted', 'CATEGORY_NOT_USABLE']
+    ]);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list'))).toHaveLength(1);
+
+    await expect(
+      new MoneyloverClient('t').addTransaction({
+        walletId: 'ordi',
+        categoryId: '30BC0A0E515245EBAC29F55BAFDA1780',
+        amount: '1',
+        date: '2026-10-08',
+        dryRun: true
+      })
+    ).rejects.toMatchObject({ code: 'CATEGORY_NOT_USABLE' });
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
 });
