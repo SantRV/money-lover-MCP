@@ -25,13 +25,19 @@ const json = (data, extra = {}) =>
 describe('phase 2 API behaviour', () => {
   const originalFetch = global.fetch;
   let cacheDir;
+  let stateDir;
 
   afterEach(async () => {
     global.fetch = originalFetch;
     delete process.env.MONEYLOVER_TOKEN_CACHE_DIR;
+    delete process.env.MONEYLOVER_STATE_DIR;
     if (cacheDir) {
       await fs.rm(cacheDir, { recursive: true, force: true });
       cacheDir = undefined;
+    }
+    if (stateDir) {
+      await fs.rm(stateDir, { recursive: true, force: true });
+      stateDir = undefined;
     }
   });
 
@@ -349,6 +355,92 @@ describe('phase 2 API behaviour', () => {
     expect(summary.results[0].note).toBe('Cafe');
     expect(summary.results[0].payload.note).toBe('Cafe');
     expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
+  });
+
+  it('does not mint a batch id when nothing is written', async () => {
+    global.fetch = vi.fn(async (url) => {
+      const request = String(url);
+      if (request.endsWith('/transaction/search')) {
+        return json({
+          transactions: [{ _id: 'existing', amount: 9, note: 'Cafe', displayDate: '2026-04-18T00:00:00.000Z' }]
+        });
+      }
+      if (request.endsWith('/category/list-all')) {
+        return json([{ _id: 'global-food', name: 'Food', type: 2, account: 'w1' }]);
+      }
+      return json({});
+    });
+
+    const skipped = await createTransactions(new MoneyloverClient('t'), {
+      walletId: 'w1',
+      markBatch: true,
+      transactions: [{ date: '2026-04-18', amount: '9', note: 'Cafe', categoryId: 'global-food' }]
+    });
+    expect(skipped.skipped).toBe(1);
+    expect(skipped.created).toBe(0);
+    expect(skipped.batchId).toBeNull();
+    expect(skipped.results[0].note).toBe('Cafe');
+
+    const preview = await createTransactions(new MoneyloverClient('t'), {
+      walletId: 'w1',
+      dryRun: true,
+      skipDuplicates: false,
+      markBatch: true,
+      transactions: [{ date: '2026-04-18', amount: '9', note: 'Cafe', categoryId: 'global-food' }]
+    });
+    expect(preview.previewed).toBe(1);
+    expect(preview.batchId).toBeNull();
+    expect(preview.results[0].payload.note).toBe('Cafe');
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
+  });
+
+  it('undoes a batch from note tags when the import log is missing', async () => {
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'moneylover-tokens-'));
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'moneylover-state-'));
+    process.env.MONEYLOVER_TOKEN_CACHE_DIR = cacheDir;
+    process.env.MONEYLOVER_STATE_DIR = stateDir;
+    const searches = [];
+    global.fetch = vi.fn(async (url, init) => {
+      const request = String(url);
+      if (request.endsWith('/transaction/search')) {
+        const body = JSON.parse(init.body);
+        searches.push(body);
+        if (body.note) {
+          return json({ transactions: [] });
+        }
+        return json({
+          transactions: [
+            { _id: 't1', note: 'Cafe ml-batch:batch1234', displayDate: '2026-04-18' },
+            { _id: 't2', note: 'Rent', displayDate: '2026-04-18' },
+            { _id: 't3', note: 'Bus ml-batch:batch1234', displayDate: '2026-04-19' }
+          ]
+        });
+      }
+      if (request.endsWith('/transaction/delete')) {
+        return json({ ok: true });
+      }
+      return json({});
+    });
+
+    const result = await undoImport(new MoneyloverClient('t'), 'batch1234', {
+      walletId: 'w1',
+      startDate: '2026-04-01',
+      endDate: '2026-04-30'
+    });
+
+    expect(searches[0]).toMatchObject({
+      note: 'ml-batch:batch1234',
+      accounts: ['w1'],
+      startDate: '2026-04-01',
+      endDate: '2026-04-30'
+    });
+    expect(searches[1]).toMatchObject({ accounts: ['w1'], startDate: '2026-04-01', endDate: '2026-04-30' });
+    expect(searches[1].note).toBeUndefined();
+    expect(result.fromLog).toBe(0);
+    expect(result.fromSearch).toBe(2);
+    expect(result.deleted).toEqual(['t1', 't3']);
+    expect(await fs.readdir(cacheDir)).toEqual([]);
+    expect(await fs.readdir(stateDir)).toEqual([]);
   });
 
   it('explains a category write failure on a user_category_v2 account', async () => {

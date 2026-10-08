@@ -70,7 +70,7 @@ A local checkout:
 
 `EMAIL` and `PASSWORD` still work if the `MONEYLOVER_` names are unset. `MONEYLOVER_TOKEN` uses an existing JWT and does not log in again. If that token is rejected and no email/password is set, the server stops instead of retrying the same token.
 
-Optional: `MONEYLOVER_MCP_ENV_FILE` points at a dotenv file. `MONEYLOVER_MCP_DISABLE_ENV_FILE=1` skips dotenv loading. `MONEYLOVER_TIMEOUT_MS` is the per-request timeout (default 30000). `MONEYLOVER_TOKEN_CACHE_DIR` moves the token cache.
+Optional: `MONEYLOVER_MCP_ENV_FILE` points at a dotenv file. `MONEYLOVER_MCP_DISABLE_ENV_FILE=1` skips dotenv loading. `MONEYLOVER_TIMEOUT_MS` is the per-request timeout (default 30000). `MONEYLOVER_TOKEN_CACHE_DIR` moves the token cache. `MONEYLOVER_STATE_DIR` moves the import logs to a different directory from the token cache.
 
 ## Dates, amounts, and categories
 
@@ -86,12 +86,12 @@ Optional: `MONEYLOVER_MCP_ENV_FILE` points at a dotenv file. `MONEYLOVER_MCP_DIS
 - `add_category` takes `parentId` for a sub-category. `type` 1 is income and `type` 2 is expense.
 - Australian dollars are currency id **20**. `edit_wallet` reads the wallet first and sends `account_type` (4 is a credit wallet), `exclude_total`, and `archived` back so a rename does not drop them.
 - A transfer between your own wallets is `transfer_money` (`/transaction/add-multi` with a from leg, a to leg, and an optional fee). Recording both sides as normal expenses double-counts a card payment. Default notes use wallet names from `/wallet/list`, loaded once per process. Pass `fromNote` and `toNote` to skip that lookup.
-- `add_transactions` and `import_transactions_csv` append `ml-batch:<id>` to each note and store the created ids under the token cache. `undo_import` deletes that batch and requires `confirm: true`. Set `markBatch: false` to leave the marker out of the notes. The import log is not written either, and the result warns that `undo_import` cannot find the batch.
+- `add_transactions` and `import_transactions_csv` append `ml-batch:<id>` to each note that is actually created, and store those ids in the import log. A dry run or a run that only skips duplicates does not mint a batch id and does not write a log. The log lives under `MONEYLOVER_STATE_DIR` when that is set, and otherwise under the token cache. `undo_import` deletes that batch and requires `confirm: true`. In a later process with no log file, pass `walletId`, `startDate`, and `endDate`. It searches that range for notes tagged `ml-batch:<batchId>`. Set `markBatch: false` to leave the marker out of the notes. The import log is not written either, and the result warns that `undo_import` cannot find the batch.
 - Duplicate checks call `/transaction/search` with `accounts`, `startDate`, and `endDate`. The batch marker is ignored when comparing notes.
 
 ## Safety
 
-- `delete_transaction`, `delete_wallet`, `delete_category`, `delete_budget`, `merge_categories`, and `undo_import` do nothing unless `confirm` is `true`.
+- `delete_transaction`, `delete_wallet`, `delete_category`, `delete_budget`, `merge_categories`, and `undo_import` do nothing unless `confirm` is `true`. The refusal is code `CONFIRM_REQUIRED`.
 - `delete_transaction` posts `{_id, delRelated}`. `delRelated` is false unless `deleteRelated` is true, which removes both legs of a transfer. The server assigns the transaction id when it is created (often prefixed `web`). This client does not invent that id.
 - Write tools accept `dryRun: true`. They validate and return the payload without posting it.
 - `add_transactions` and `import_transactions_csv` default to skipping duplicates: same wallet, same calendar date, same absolute amount, and a similar note (case and punctuation ignored; a note of 8+ characters may match when one contains the other). Blank notes match other blank notes.
@@ -188,7 +188,7 @@ await client.addTransaction({
 
 ## Security
 
-- The JWT is cached in `~/.moneylover-mcp/` (or `MONEYLOVER_TOKEN_CACHE_DIR`). The directory is mode `0700` and each token file is mode `0600`. Delete the directory to drop cached sessions.
+- The JWT is cached in `~/.moneylover-mcp/` (or `MONEYLOVER_TOKEN_CACHE_DIR`). The directory is mode `0700` and each token file is mode `0600`. Delete the directory to drop cached sessions. Import logs are files in that directory’s `imports/` folder, or in `MONEYLOVER_STATE_DIR/imports` when the state directory is set. Those files are mode `0600`.
 - Tool results and error text are redacted for JWTs, `password`, and token fields. `login` does not echo the access token.
 - Logs do not include the token or password.
 - Do not commit `.env`, `.mcp.json`, or a CSV export.
@@ -242,6 +242,6 @@ Still unchecked:
 - Whether any account stores expense amounts as negative numbers. The sample responses in ferdhika31/moneylover-client-go and the add calls in leMaik/moneylover-cli and allexxis/moneylover-client use a positive magnitude plus category type. This server does the same.
 - Whether a live account returns `e: 706` in the body, or only HTTP 401, and whether the OAuth login response includes `refresh_token` as well as `access_token`. The refresh call matches the web client (`POST /user/refresh-token` with `{ refreshToken }`).
 - The fields inside `/wallet/balance`’s `balance[0]`. The balance helpers accept a number or an `amount` / `balance` field.
-- Whether `/transaction/search` with `note` finds an `ml-batch:` marker as a substring, which `undo_import` uses in addition to the local id log.
+- Whether `/transaction/search` with `note` finds an `ml-batch:` marker as a substring. `undo_import` without a local log also pages the wallet and date range and keeps notes that contain the tag.
 - Whether `/report/{walletId}` and `/budget/*` succeed for this account, including a `user_category_v2` account where the web app hides those buttons.
 - Whether AUD remains currency id 20. That id is the one named in review; `get_currencies` is the check.

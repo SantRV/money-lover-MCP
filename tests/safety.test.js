@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { assertConfirm } from '../src/safety.js';
+import { assertConfirm, CONFIRM_REQUIRED } from '../src/safety.js';
 
 describe('destructive confirms', () => {
   it('requires confirm for a real delete', () => {
-    expect(() => assertConfirm({ confirm: false, action: 'delete this transaction' })).toThrow(/confirm: true/);
-    expect(() => assertConfirm({ action: 'delete this wallet' })).toThrow(/confirm: true/);
+    expect(() => assertConfirm({ confirm: false, action: 'delete this transaction' })).toThrow(
+      expect.objectContaining({ code: CONFIRM_REQUIRED })
+    );
+    expect(() => assertConfirm({ action: 'merge these categories' })).toThrow(
+      expect.objectContaining({ code: CONFIRM_REQUIRED, message: expect.stringMatching(/confirm: true/) })
+    );
   });
 
   it('allows a dry run without confirm', () => {

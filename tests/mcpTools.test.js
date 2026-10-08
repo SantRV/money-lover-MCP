@@ -94,6 +94,7 @@ describe('MCP tools', () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toMatch(/confirm: true/);
+    expect(JSON.stringify(result)).toMatch(/CONFIRM_REQUIRED/);
     await client.close();
   });
 

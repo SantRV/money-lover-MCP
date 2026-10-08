@@ -39,19 +39,25 @@ export const withBatchMarker = (note, batchId) => {
   return `${base.slice(0, room).trim()}${suffix}`;
 };
 
-const importDir = () => path.join(cacheDir(), 'imports');
+/** Import logs live here. MONEYLOVER_STATE_DIR is separate from the token cache. */
+export const stateDir = () => process.env.MONEYLOVER_STATE_DIR?.trim() || cacheDir();
+
+const importDir = () => path.join(stateDir(), 'imports');
 
 const importPath = (batchId) => {
   const id = assertBatchId(batchId);
   const dir = importDir();
   const filePath = path.join(dir, `${id}.json`);
   if (!path.resolve(filePath).startsWith(`${path.resolve(dir)}${path.sep}`)) {
-    throw new Error('Refusing to write an import log outside the cache directory');
+    throw new Error('Refusing to write an import log outside the state directory');
   }
   return filePath;
 };
 
 const ensureImportDir = async () => {
+  const root = stateDir();
+  await fs.mkdir(root, { recursive: true });
+  await fs.chmod(root, 0o700);
   const dir = importDir();
   await fs.mkdir(dir, { recursive: true });
   await fs.chmod(dir, 0o700);

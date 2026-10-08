@@ -480,7 +480,9 @@ const dryRunArgument = z
 const confirmArgument = z
   .boolean()
   .optional()
-  .describe('Must be true to delete. Pass dryRun: true to preview without confirm.');
+  .describe(
+    'Must be true to delete or merge. A refusal is code CONFIRM_REQUIRED. Pass dryRun: true to preview without confirm.'
+  );
 
 const walletIdArgument = {
   walletId: z.string().min(1).describe('Wallet identifier')
@@ -1598,19 +1600,32 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Undo Import',
       description:
-        'Delete the transactions from one import batch. Uses the local import log and any transaction whose note still contains that ml-batch marker. Requires confirm: true. Set deleteRelated: true to also delete a transfer’s other leg. dryRun lists the ids and does not delete them.',
+        'Delete the transactions from one import batch. Uses the local import log when this process has one. With no log, pass walletId plus startDate and endDate and it searches that range for notes tagged ml-batch:<batchId>. Requires confirm: true. A refusal is code CONFIRM_REQUIRED. Set deleteRelated: true to also delete a transfer’s other leg. dryRun lists the ids and does not delete them.',
       inputSchema: {
         batchId: z.string().min(4).max(80).describe('batchId returned by add_transactions or import_transactions_csv.'),
+        walletId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Wallet to search when the import log is missing. Also used with startDate and endDate.'),
+        startDate: dateArgument.optional().describe('First day to search when the import log is missing, YYYY-MM-DD.'),
+        endDate: dateArgument.optional().describe('Last day to search when the import log is missing, YYYY-MM-DD.'),
         deleteRelated: z.boolean().optional().describe('Also delete related transfer legs. Default false.'),
         confirm: confirmArgument,
         dryRun: dryRunArgument
       }
     },
-    guard(async ({ batchId, deleteRelated, confirm, dryRun }) => {
+    guard(async ({ batchId, walletId, startDate, endDate, deleteRelated, confirm, dryRun }) => {
       assertConfirm({ confirm, dryRun, action: 'delete this import batch' });
       const id = assertBatchId(batchId);
       return runWithClient(undefined, (client) =>
-        undoImport(client, id, { deleteRelated: deleteRelated === true, dryRun: dryRun === true })
+        undoImport(client, id, {
+          deleteRelated: deleteRelated === true,
+          dryRun: dryRun === true,
+          walletId,
+          startDate,
+          endDate
+        })
       );
     })
   );

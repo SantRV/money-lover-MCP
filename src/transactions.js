@@ -71,7 +71,16 @@ export const createTransactions = async (client, options) => {
   const amountMode = options.amountMode === 'signed' ? 'signed' : 'magnitude';
   const timeZone = options.timeZone;
   const markBatch = options.markBatch === false ? false : options.markBatch === true || Boolean(options.batchId);
-  const batchId = markBatch ? (options.batchId ?? newBatchId()) : null;
+  let batchId = null;
+  const batchIdForCreate = () => {
+    if (!markBatch || dryRun) {
+      return null;
+    }
+    if (!batchId) {
+      batchId = options.batchId ?? newBatchId();
+    }
+    return batchId;
+  };
 
   let existing = [];
   if (skipDuplicates) {
@@ -121,8 +130,7 @@ export const createTransactions = async (client, options) => {
         image: row.image
       });
       const noteForMatch = stripBatchMarker(prepared.note);
-      const storedNote = withBatchMarker(prepared.note, batchId);
-      const payload = { ...prepared.payload, note: storedNote };
+      const payload = { ...prepared.payload, note: noteForMatch };
       const candidate = {
         date: prepared.date,
         cents: prepared.cents,
@@ -135,7 +143,7 @@ export const createTransactions = async (client, options) => {
           status: 'skipped_duplicate',
           date: prepared.date,
           amount: prepared.amountText ?? payload.amount,
-          note: storedNote,
+          note: noteForMatch,
           categoryId: prepared.categoryId,
           direction: prepared.direction,
           matchId: duplicate.id
@@ -150,7 +158,7 @@ export const createTransactions = async (client, options) => {
           status: 'dry_run',
           date: prepared.date,
           amount: prepared.amountText ?? payload.amount,
-          note: storedNote,
+          note: noteForMatch,
           categoryId: prepared.categoryId,
           direction: prepared.direction,
           warnings: prepared.warnings,
@@ -159,10 +167,13 @@ export const createTransactions = async (client, options) => {
         continue;
       }
 
+      const writeBatchId = batchIdForCreate();
+      const storedNote = withBatchMarker(prepared.note, writeBatchId);
+      payload.note = storedNote;
       const created = await client.addPreparedTransaction({ ...prepared, payload });
       const createdId = created?._id ?? null;
-      if (batchId && createdId) {
-        await appendImportLog(batchId, { id: createdId, walletId });
+      if (writeBatchId && createdId) {
+        await appendImportLog(writeBatchId, { id: createdId, walletId });
       }
       accepted.push({ ...candidate, id: createdId });
       results.push({
