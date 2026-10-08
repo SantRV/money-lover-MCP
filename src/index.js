@@ -1,1 +1,1 @@
-export { MoneyloverClient, MoneyloverApiError, CategoryType } from './moneyloverClient.js';
+export { MoneyloverClient, MoneyloverApiError, CategoryType, isAuthError } from './moneyloverClient.js';

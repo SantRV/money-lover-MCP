@@ -1,11 +1,12 @@
 {
   "mcpServers": {
-    "mcp-moneylover": {
-      "command": "node",
-      "args": ["/absolute/path/to/moneylover-mcp/src/server.js"],
+    "money-lover": {
+      "command": "npx",
+      "args": ["-y", "github:SantRV/money-lover-MCP"],
       "env": {
-        "EMAIL": "your@email.com",
-        "PASSWORD": "your-password"
+        "MONEYLOVER_EMAIL": "you@example.com",
+        "MONEYLOVER_PASSWORD": "your-password",
+        "MONEYLOVER_TIMEZONE": "Australia/Adelaide"
       }
     }
   }

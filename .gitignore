@@ -5,6 +5,8 @@ node_modules/
 .vscode/mcp.json
 .idea
 .env
+.env.*
+!.env.example
 sessions/
 .mcp.json
 tests/mcp-tester/mcps.json

@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const originalEnv = {
   EMAIL: process.env.EMAIL,
   PASSWORD: process.env.PASSWORD,
+  MONEYLOVER_EMAIL: process.env.MONEYLOVER_EMAIL,
+  MONEYLOVER_PASSWORD: process.env.MONEYLOVER_PASSWORD,
   MONEYLOVER_TOKEN: process.env.MONEYLOVER_TOKEN,
   MONEY_LOVER_TOKEN: process.env.MONEY_LOVER_TOKEN,
   MONEYLOVER_MCP_DISABLE_ENV_FILE: process.env.MONEYLOVER_MCP_DISABLE_ENV_FILE,
@@ -57,7 +59,7 @@ describe('Money Lover MCP server env token resolution', () => {
     __test.clearEnvTokenCache();
 
     await expect(__test.runWithClient(undefined, () => Promise.resolve('ok'))).rejects.toThrow(
-      'Token is required'
+      /credentials are required/
     );
   });
 
@@ -100,7 +102,7 @@ describe('Money Lover MCP server env token resolution', () => {
     const { __test } = await import('../src/server.js');
     __test.clearEnvTokenCache();
 
-    const result = await __test.runWithClient(undefined, client => client.getUserInfo());
+    const result = await __test.runWithClient(undefined, (client) => client.getUserInfo());
 
     expect(result).toEqual({ ok: true });
     expect(getToken).toHaveBeenCalledTimes(1);
@@ -149,7 +151,7 @@ describe('Money Lover MCP server env token resolution', () => {
     const { __test } = await import('../src/server.js');
     __test.clearEnvTokenCache();
 
-    const result = await __test.runWithClient(undefined, client => client.getWallets());
+    const result = await __test.runWithClient(undefined, (client) => client.getWallets());
 
     expect(result).toEqual(['wallet']);
     expect(constructedTokens).toEqual(['env-token']);
@@ -184,7 +186,7 @@ describe('Money Lover MCP server env token resolution', () => {
     const { __test } = await import('../src/server.js');
     __test.clearEnvTokenCache();
 
-    const resolved = await __test.runWithResolvedToken('', token => Promise.resolve(token));
+    const resolved = await __test.runWithResolvedToken('', (token) => Promise.resolve(token));
 
     expect(resolved).toBe('token-from-env');
     expect(getToken).toHaveBeenCalledWith('user@example.com', 'secret');
@@ -241,7 +243,7 @@ describe('Money Lover MCP server env token resolution', () => {
       const { __test } = await import('../src/server.js');
       __test.clearEnvTokenCache();
 
-      const result = await __test.runWithClient(undefined, client => client.getUserInfo());
+      const result = await __test.runWithClient(undefined, (client) => client.getUserInfo());
 
       expect(result).toEqual({ token: 'env-file-token' });
       expect(getToken).toHaveBeenCalledWith('file@example.com', 'file-pass');
@@ -291,7 +293,7 @@ describe('Money Lover MCP server env token resolution', () => {
     const { __test } = await import('../src/server.js');
     __test.clearEnvTokenCache();
 
-    const result = await __test.runWithClient(undefined, client => client.getUserInfo());
+    const result = await __test.runWithClient(undefined, (client) => client.getUserInfo());
 
     expect(result).toEqual({ via: 'cached-token' });
     expect(readToken).toHaveBeenCalledTimes(1);
@@ -349,7 +351,7 @@ describe('Money Lover MCP server env token resolution', () => {
     const { __test } = await import('../src/server.js');
     __test.clearEnvTokenCache();
 
-    const result = await __test.runWithClient(undefined, client => client.getWallets());
+    const result = await __test.runWithClient(undefined, (client) => client.getWallets());
 
     expect(result).toEqual({ token: 'refreshed-token' });
     expect(callCount).toBe(2);
@@ -357,5 +359,67 @@ describe('Money Lover MCP server env token resolution', () => {
     expect(readToken).toHaveBeenCalledTimes(2);
     expect(removeToken).toHaveBeenCalledWith('user@example.com');
     expect(writeToken).toHaveBeenCalledWith('user@example.com', 'refreshed-token');
+  });
+
+  it('does not reuse a rejected direct token when no password is available', async () => {
+    delete process.env.EMAIL;
+    delete process.env.PASSWORD;
+    delete process.env.MONEYLOVER_EMAIL;
+    delete process.env.MONEYLOVER_PASSWORD;
+    process.env.MONEYLOVER_TOKEN = 'expired-direct-token';
+
+    class MockError extends Error {}
+
+    class MockClient {
+      constructor() {}
+      getUserInfo() {
+        throw new MockError('user_unauthenticated');
+      }
+      static getToken = vi.fn();
+    }
+
+    vi.doMock('../src/moneyloverClient.js', () => ({
+      MoneyloverClient: MockClient,
+      MoneyloverApiError: MockError
+    }));
+    vi.doMock('../src/tokenCache.js', () => ({
+      readToken: vi.fn(),
+      writeToken: vi.fn(),
+      removeToken: vi.fn()
+    }));
+
+    const { __test } = await import('../src/server.js');
+    __test.clearEnvTokenCache();
+
+    await expect(__test.runWithClient(undefined, (client) => client.getUserInfo())).rejects.toThrow(
+      /cannot be refreshed/
+    );
+    expect(MockClient.getToken).not.toHaveBeenCalled();
+  });
+
+  it('prefers MONEYLOVER_EMAIL over EMAIL', async () => {
+    process.env.EMAIL = 'other@example.com';
+    process.env.PASSWORD = 'other-secret';
+    process.env.MONEYLOVER_EMAIL = 'user@example.com';
+    process.env.MONEYLOVER_PASSWORD = 'secret';
+
+    const getToken = vi.fn().mockResolvedValue('named-token');
+    vi.doMock('../src/moneyloverClient.js', () => ({
+      MoneyloverClient: class {
+        static getToken = getToken;
+      },
+      MoneyloverApiError: class extends Error {}
+    }));
+    vi.doMock('../src/tokenCache.js', () => ({
+      readToken: vi.fn().mockResolvedValue(null),
+      writeToken: vi.fn().mockResolvedValue(),
+      removeToken: vi.fn()
+    }));
+
+    const { __test } = await import('../src/server.js');
+    __test.clearEnvTokenCache();
+    const token = await __test.fetchEnvToken();
+    expect(token).toBe('named-token');
+    expect(getToken).toHaveBeenCalledWith('user@example.com', 'secret');
   });
 });

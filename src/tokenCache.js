@@ -2,23 +2,21 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-const CACHE_DIR = path.join(os.homedir(), '.moneylover-mcp');
+const encodeEmail = (email) => Buffer.from(email, 'utf8').toString('base64url');
 
-const encodeEmail = email => Buffer.from(email, 'utf8').toString('base64url');
+export const cacheDir = () =>
+  process.env.MONEYLOVER_TOKEN_CACHE_DIR?.trim() || path.join(os.homedir(), '.moneylover-mcp');
 
-const getTokenPath = email => path.join(CACHE_DIR, `${encodeEmail(email)}.json`);
+export const getTokenPath = (email) => path.join(cacheDir(), `${encodeEmail(email)}.json`);
 
 const ensureCacheDir = async () => {
-  try {
-    await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
-  } catch (error) {
-    if (error.code !== 'EEXIST') {
-      throw error;
-    }
-  }
+  const dir = cacheDir();
+  await fs.mkdir(dir, { recursive: true });
+  await fs.chmod(dir, 0o700);
+  return dir;
 };
 
-export const readToken = async email => {
+export const readToken = async (email) => {
   if (!email) {
     return null;
   }
@@ -39,23 +37,31 @@ export const writeToken = async (email, token) => {
   if (!email || !token) {
     return;
   }
-  await ensureCacheDir();
+  const dir = await ensureCacheDir();
+  const filePath = getTokenPath(email);
+  const resolvedDir = path.resolve(dir);
+  const resolvedFile = path.resolve(filePath);
+  if (!resolvedFile.startsWith(`${resolvedDir}${path.sep}`)) {
+    throw new Error('Refusing to write a token cache file outside the cache directory');
+  }
+
   const payload = {
     token,
     updatedAt: new Date().toISOString()
   };
-  const filePath = getTokenPath(email);
-  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  const tempPath = path.join(dir, `.${encodeEmail(email)}.${process.pid}.tmp`);
   try {
+    await fs.writeFile(tempPath, JSON.stringify(payload), { mode: 0o600, flag: 'w' });
+    await fs.chmod(tempPath, 0o600);
+    await fs.rename(tempPath, filePath);
     await fs.chmod(filePath, 0o600);
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    throw error;
   }
 };
 
-export const removeToken = async email => {
+export const removeToken = async (email) => {
   if (!email) {
     return;
   }
@@ -69,7 +75,7 @@ export const removeToken = async email => {
 };
 
 export const __test = {
-  CACHE_DIR,
+  cacheDir,
   getTokenPath,
   ensureCacheDir
 };

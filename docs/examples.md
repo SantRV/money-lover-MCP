@@ -16,10 +16,10 @@ Prompt: "Log in to Money Lover with email user@example.com and password secret12
 
 ```json
 Tool call: login({ email: "user@example.com", password: "secret123" })
-Response:  { "token": "eyJ..." }
+Response:  { "authenticated": true, "email": "user@example.com", "cached": true }
 ```
 
-> **Note:** The server caches tokens under `~/.moneylover-mcp/`. You only need `login` explicitly when building clients that manage their own token lifecycle.
+> **Note:** The server caches the JWT under `~/.moneylover-mcp/` and does not return it. Later tools use that cache. You only need `login` when the process was not started with `MONEYLOVER_EMAIL` and `MONEYLOVER_PASSWORD`.
 
 ---
 
@@ -144,14 +144,14 @@ Response:  { "_id": "590f65b...", "name": "Expenses", ... }
 
 Permanently deletes a wallet and all of its transactions.
 
-**Required:** `walletId`
+**Required:** `walletId`, `confirm: true`
 
 ```
 Prompt: "Delete wallet web1a2b3c..."
 ```
 
 ```json
-Tool call: delete_wallet({ walletId: "web1a2b3c..." })
+Tool call: delete_wallet({ walletId: "web1a2b3c...", confirm: true })
 Response:  {}
 ```
 
@@ -169,7 +169,7 @@ Prompt: "List the categories in wallet 590f65bec16649948da1f4cfb94870c6."
 
 ```json
 Tool call: get_categories({ walletId: "590f65bec16649948da1f4cfb94870c6" })
-Response:  { "categories": [{ "_id": "225c6924...", "name": "Food & Drink", "type": 1 }, ...] }
+Response:  { "categories": [{ "_id": "225c6924...", "name": "Food & Drink", "type": 2, "typeName": "expense" }, ...] }
 ```
 
 ### `get_all_categories`
@@ -190,15 +190,15 @@ Response:  { "categories": [{ "_id": "9c0aee57...", "name": "Food & Drink", "acc
 Creates a category inside a wallet. Use `get_icons` to browse valid icon names (format: `icon_N`, e.g. `icon_3`).
 
 **Required:** `walletId`, `name`, `icon`, `type`  
-**type:** `1` = expense, `2` = income
+**type:** `1` = income, `2` = expense
 
 ```
 Prompt: "In wallet 590f65bec16649948da1f4cfb94870c6, create an expense category named 'Gym' using icon 'icon_3'."
 ```
 
 ```json
-Tool call: add_category({ walletId: "590f65bec16649948da1f4cfb94870c6", name: "Gym", icon: "icon_3", type: 1 })
-Response:  { "_id": "web4f5a6b...", "name": "Gym", "type": 1 }
+Tool call: add_category({ walletId: "590f65bec16649948da1f4cfb94870c6", name: "Gym", icon: "icon_3", type: 2 })
+Response:  { "_id": "web4f5a6b...", "name": "Gym", "type": 2 }
 ```
 
 ### `edit_category`
@@ -221,14 +221,14 @@ Response:  { "_id": "web4f5a6b...", "name": "Fitness" }
 
 ### `delete_category`
 
-**Required:** `categoryId`
+**Required:** `categoryId`, `confirm: true`
 
 ```
 Prompt: "Delete category web4f5a6b..."
 ```
 
 ```json
-Tool call: delete_category({ categoryId: "web4f5a6b..." })
+Tool call: delete_category({ categoryId: "web4f5a6b...", confirm: true })
 Response:  {}
 ```
 
@@ -281,8 +281,8 @@ Updates a transaction. The Money Lover API is **full-replace** — every field m
 
 `categoryId` should be the **global** category ID from the transaction's `category._id` field (as returned by `get_transactions`), or from `get_all_categories`. The server resolves wallet-specific IDs here too.
 
-**Required:** `transactionId`, `walletId`, `categoryId`, `amount`, `date`  
-**Optional:** `note`, `with`
+**Required:** `transactionId`, `walletId`, `categoryId`, `amount`, `date`, `note`, `with`  
+Omitting `note` or `with` is rejected so a full-replace edit cannot clear them by accident.
 
 ```
 Prompt: "Update transaction bfa8b03330b24579849acdf50db11304 — change note to 'Team lunch'. Keep all other fields."
@@ -300,7 +300,8 @@ Tool call: edit_transaction({
   categoryId:    "9c0aee5796c345d087c91c0ed5bcc689",
   amount:        "50000",
   date:          "2026-04-15",
-  note:          "Team lunch"
+  note:          "Team lunch",
+  with:          []
 })
 Response:  {}
 ```
@@ -309,14 +310,14 @@ Response:  {}
 
 ### `delete_transaction`
 
-**Required:** `transactionId`
+**Required:** `transactionId`, `confirm: true`
 
 ```
 Prompt: "Delete transaction bfa8b03330b24579849acdf50db11304."
 ```
 
 ```json
-Tool call: delete_transaction({ transactionId: "bfa8b03330b24579849acdf50db11304" })
+Tool call: delete_transaction({ transactionId: "bfa8b03330b24579849acdf50db11304", confirm: true })
 Response:  {}
 ```
 

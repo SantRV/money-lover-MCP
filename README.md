@@ -1,270 +1,194 @@
 # Money Lover MCP Server
 
-Node.js implementation of a Model Context Protocol (MCP) server that wraps the unofficial Money Lover REST API. The server exposes 27 MCP tools covering authentication, wallets, categories, transactions, events, debts, and static configuration — enabling AI assistants or MCP-compatible clients to query and manage personal finance data.
+Stdio [MCP](https://modelcontextprotocol.io) server for the **unofficial** Money Lover web API (`web.moneylover.me`). It lets an assistant list wallets and categories, then import bank-statement transactions with stable calendar dates and income/expense categories.
 
-<a href="https://glama.ai/mcp/servers/@ferdhika31/moneylover-mcp">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@ferdhika31/moneylover-mcp/badge" alt="Money Lover Server MCP server" />
-</a>
+This repository is [SantRV/money-lover-MCP](https://github.com/SantRV/money-lover-MCP). It is a fork of [juansebashr/moneylover-mcp](https://github.com/juansebashr/moneylover-mcp), which extends [ferdhika31/moneylover-mcp](https://github.com/ferdhika31/moneylover-mcp). The licence is ISC. Copyright for the original work remains with Ferdhika Yudira; see [LICENSE.md](LICENSE.md).
 
-## Features
+Money Lover does not publish this API. It can change or reject requests without notice. Do not rely on it for anything you cannot check in the Money Lover app afterwards.
 
-- Auto-authentication via `EMAIL`/`PASSWORD` environment variables — no token passing required for most tools.
-- 23 read tools covering user info, wallets, categories, transactions, events, debts, icons, providers, and static config.
-- 4 write tools: create, update, and delete transactions, wallets, and categories.
-- Large responses truncated automatically to keep LLM context manageable (configurable via `limit` parameter).
-- Stdio-based server compatible with Claude Code, Claude Desktop, Cursor, and any MCP host.
-- Token caching per email under `~/.moneylover-mcp/` with automatic refresh on auth errors.
+The package is **not published to npm**. Run it from this git repository.
 
-## Prerequisites
+## Setup
 
-- Node.js 22 or newer.
-- Money Lover account credentials.
-
-## Installation
+Node.js 22 or newer.
 
 ```bash
 npm install
-```
-
-## Usage
-
-Launch the MCP server over stdio:
-
-```bash
+npm test
 npm start
 ```
 
-### Project-scoped Configuration (Claude Code)
+From another machine, without cloning:
 
-Add `.mcp.json` at the project root:
+```bash
+npx -y github:SantRV/money-lover-MCP
+```
+
+Or, after cloning:
+
+```bash
+node src/cli.js
+```
+
+### Cursor / Claude Desktop
+
+Prefer environment variables over a `.env` file. `.env` and `.mcp.json` are gitignored. The checked-in [`.mcp.json.example`](.mcp.json.example) and [`.env.example`](.env.example) contain placeholders only. Do not commit real passwords or tokens.
 
 ```json
 {
   "mcpServers": {
-    "mcp-moneylover": {
-      "command": "node",
-      "args": ["/absolute/path/to/moneylover-mcp/src/server.js"],
-      "env": {
-        "EMAIL": "your@email.com",
-        "PASSWORD": "your-password"
-      }
-    }
-  }
-}
-```
-
-And enable it in `.claude/settings.json`:
-
-```json
-{ "enabledMcpjsonServers": ["mcp-moneylover"] }
-```
-
-### Global Configuration (Claude Desktop / Cursor)
-
-```json
-{
-  "mcpServers": {
-    "mcp-moneylover": {
+    "money-lover": {
       "command": "npx",
-      "args": ["@ferdhika31/moneylover-mcp@latest"],
+      "args": ["-y", "github:SantRV/money-lover-MCP"],
       "env": {
-        "EMAIL": "your@email.com",
-        "PASSWORD": "your-password"
+        "MONEYLOVER_EMAIL": "you@example.com",
+        "MONEYLOVER_PASSWORD": "your-password",
+        "MONEYLOVER_TIMEZONE": "Australia/Adelaide"
       }
     }
   }
 }
 ```
 
-## Available Tools
+A local checkout:
 
-### Auth
+```json
+{
+  "mcpServers": {
+    "money-lover": {
+      "command": "node",
+      "args": ["/absolute/path/to/money-lover-MCP/src/cli.js"],
+      "env": {
+        "MONEYLOVER_EMAIL": "you@example.com",
+        "MONEYLOVER_PASSWORD": "your-password",
+        "MONEYLOVER_TIMEZONE": "Australia/Adelaide"
+      }
+    }
+  }
+}
+```
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `login` | Retrieve a JWT token. | `email`, `password` |
+`EMAIL` and `PASSWORD` still work if the `MONEYLOVER_` names are unset. `MONEYLOVER_TOKEN` uses an existing JWT and does not log in again. If that token is rejected and no email/password is set, the server stops instead of retrying the same token.
 
-### User
+Optional: `MONEYLOVER_MCP_ENV_FILE` points at a dotenv file. `MONEYLOVER_MCP_DISABLE_ENV_FILE=1` skips dotenv loading. `MONEYLOVER_TIMEOUT_MS` is the per-request timeout (default 30000). `MONEYLOVER_TOKEN_CACHE_DIR` moves the token cache.
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `get_user_info` | Profile associated with the session. | — |
-| `get_user_account` | Devices and active sessions. | — |
-| `get_user_profile` | Extended profile data. | — |
+## Dates, amounts, and categories
 
-### Wallets
+- Send dates as `YYYY-MM-DD`. That form is a calendar date and is **not** converted through UTC, so an Adelaide date does not become the previous day.
+- Timestamps are formatted in `MONEYLOVER_TIMEZONE` (default `Australia/Adelaide`). A value the API returns as UTC midnight, such as `2026-04-18T00:00:00.000Z`, stays `2026-04-18`.
+- Category type `1` is **income** and type `2` is **expense**. This matches the Go client and the Money Lover CLI. `list_categories` returns `typeName` so a statement can be mapped without guessing.
+- Money Lover stores a **positive** amount. The category type decides income versus expense. A leading minus is accepted on an expense category (typical bank debit) and rejected on an income category, so a negative salary is not filed as income.
+- `edit_transaction` is a full replace. `note` and `with` are required. Pass the current values back, or `""` / `[]` when you mean to clear them.
+- Wallet category ids are resolved to the global id when the name and metadata match. If they do not, the original id is sent and the result includes a warning.
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `get_wallets` | List all wallets. | — |
-| `get_wallet_balance` | Balance summary for a wallet. | `walletId` |
-| `get_shared_wallets` | Wallets shared with other users. | — |
-| `get_awaiting_shared_wallets` | Pending share invitations. | — |
-| `add_wallet` | Create a new wallet. | `name`, `currencyId`; optional `icon` |
-| `edit_wallet` | Update wallet name, icon, or currency. | `walletId`, `currencyId` (required by API); optional `name`, `icon` |
-| `delete_wallet` | Delete a wallet permanently. | `walletId` |
+## Safety
 
-### Categories
+- `delete_transaction`, `delete_wallet`, and `delete_category` do nothing unless `confirm` is `true`.
+- Write tools accept `dryRun: true`. They validate and return the payload without posting it.
+- `add_transactions` and `import_transactions_csv` default to skipping duplicates: same wallet, same calendar date, same absolute amount, and a similar note (case and punctuation ignored; a note of 8+ characters may match when one contains the other). Blank notes match other blank notes.
+- Each import row returns its own status (`created`, `skipped_duplicate`, `dry_run`, or `error`). One bad row does not roll back rows that already succeeded. Run again with `skipDuplicates: true` after a partial import.
+- Batches are limited to 200 rows.
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `get_categories` | Categories for a specific wallet. | `walletId` |
-| `get_all_categories` | All categories across every wallet. | optional `limit` (default 50) |
-| `add_category` | Create a category in a wallet. | `walletId`, `name`, `icon` (use `get_icons` to get valid names, e.g. `icon_3`), `type` (1=income, 2=expense) |
-| `edit_category` | Rename a category or change its icon. | `categoryId`, `icon` (required by API even when only renaming); optional `name` |
-| `delete_category` | Delete a category. | `categoryId` |
+## Tools
 
+Authentication is read from the environment. Tools do not take a token argument, and `login` does not return the JWT.
 
-### Transactions
+| Tool                                   | What it does                                                                                                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `login`                                | Cache a session for an email and password. Does not return the token.                                                                                                                       |
+| `get_user_info`                        | Profile for the current session.                                                                                                                                                            |
+| `get_user_account`                     | Devices and sessions.                                                                                                                                                                       |
+| `get_user_profile`                     | Extended profile.                                                                                                                                                                           |
+| `get_wallets`                          | Wallets. Use `_id` as `walletId`.                                                                                                                                                           |
+| `get_wallet_balance`                   | Balance for one wallet.                                                                                                                                                                     |
+| `get_shared_wallets`                   | Wallets shared with other people.                                                                                                                                                           |
+| `get_awaiting_shared_wallets`          | Pending share invitations.                                                                                                                                                                  |
+| `add_wallet`                           | Create a wallet. `currencyId` from `get_currencies`. Optional `dryRun`.                                                                                                                     |
+| `edit_wallet`                          | Update a wallet. `currencyId` is required even when only the name changes.                                                                                                                  |
+| `delete_wallet`                        | Delete a wallet. Requires `confirm: true`.                                                                                                                                                  |
+| `get_categories`                       | Categories for one wallet, with `typeName`.                                                                                                                                                 |
+| `list_categories`                      | Compact income and expense lists for mapping a statement.                                                                                                                                   |
+| `get_all_categories`                   | Categories across your wallets, paged. Records tied to another wallet id are left out.                                                                                                      |
+| `add_category`                         | Create a category. `type` 1 income, 2 expense.                                                                                                                                              |
+| `edit_category`                        | Rename a category. `icon` is required even when unchanged.                                                                                                                                  |
+| `delete_category`                      | Delete a category. Requires `confirm: true`.                                                                                                                                                |
+| `get_transactions`                     | Transactions between two dates. `displayDate` is `YYYY-MM-DD`. Default page size 500. `truncated` and `nextOffset` say when to continue.                                                    |
+| `add_transaction`                      | Create one transaction. Optional `dryRun` and `skipDuplicates`.                                                                                                                             |
+| `add_transactions`                     | Create up to 200 transactions. Per-row results. `skipDuplicates` defaults to true.                                                                                                          |
+| `import_transactions_csv`              | Parse a bank CSV (date, amount and/or debit/credit, description). Australian `DD/MM/YYYY` when the order is ambiguous. Returns parsed rows instead of writing when no category is supplied. |
+| `edit_transaction`                     | Full replace. Requires `note` and `with`.                                                                                                                                                   |
+| `delete_transaction`                   | Delete one transaction. Requires `confirm: true`.                                                                                                                                           |
+| `search_transactions`                  | Search. Paged, with `truncated`.                                                                                                                                                            |
+| `get_transaction_search_config`        | Search filter metadata.                                                                                                                                                                     |
+| `get_debt_transactions`                | Transactions flagged as debts.                                                                                                                                                              |
+| `get_related_transactions`             | Related transactions for a list of ids.                                                                                                                                                     |
+| `get_related_transactions_by_category` | Related transactions for a category.                                                                                                                                                        |
+| `get_related_transactions_by_wallet`   | Related transactions for a wallet.                                                                                                                                                          |
+| `get_events`                           | Savings goals / campaigns for a wallet.                                                                                                                                                     |
+| `get_debts`                            | Open debts in a wallet.                                                                                                                                                                     |
+| `get_icons`                            | Icon pack. Names look like `icon_3`.                                                                                                                                                        |
+| `get_linked_providers`                 | Institutions Money Lover can link. This server does not start a bank link.                                                                                                                  |
+| `get_currencies`                       | Currency catalogue.                                                                                                                                                                         |
+| `get_exchange_rates`                   | Exchange-rate snapshot.                                                                                                                                                                     |
+| `get_other_config`                     | Static `/other/config` payload.                                                                                                                                                             |
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `get_transactions` | Transactions in a date range. | `walletId`, `startDate`, `endDate` (YYYY-MM-DD) |
-| `add_transaction` | Create a transaction. Category IDs from `get_categories` are resolved to global IDs automatically. | `walletId`, `categoryId`, `amount`, `date`; optional `note`, `with` |
-| `edit_transaction` | Update a transaction. The API requires the full payload on every edit — fetch the transaction first if you need current values. `categoryId` is resolved to global automatically. | `transactionId`, `walletId`, `categoryId`, `amount`, `date`; optional `note`, `with` |
-| `delete_transaction` | Delete a transaction. | `transactionId` |
-| `search_transactions` | Free-form search with optional filters. | optional `filters`, `limit` (default 20) |
-| `get_debt_transactions` | Transactions flagged as debts/loans. | — |
-| `get_related_transactions` | Related transactions by ID list. | `ids` (array) |
-| `get_related_transactions_by_category` | Related transactions for a category. | `categoryId` |
-| `get_related_transactions_by_wallet` | Related transactions for a wallet. | `walletId` |
-| `get_transaction_search_config` | Available search filter options. | optional `limit` (default 20) |
+Prompt-sized examples for the original tools are in [docs/examples.md](docs/examples.md).
 
+### Import a statement
 
+1. `get_wallets` and choose `walletId`.
+2. `list_categories` and note income versus expense names.
+3. Either call `add_transactions` with rows shaped as `{ date, amount, note, category }`, or pass the CSV text to `import_transactions_csv` with `expenseCategory` and `incomeCategory`.
+4. Call the import with `dryRun: true` first. Check dates, amounts, and categories.
+5. Run it again without `dryRun`. Duplicates are skipped by default.
 
-### Static & Config
+`import_transactions_csv` understands common headers (`Date`, `Amount`, `Description`, `Debit`, `Credit`, `Narrative`, `Payee`). Use `mapping` when the header is unusual. Debit columns and negative amounts are expenses. Credit columns and positive amounts are income.
 
-| Tool | Description | Arguments |
-|------|-------------|-----------|
-| `get_events` | Saving goals/events for a wallet. | `walletId`; optional `limit` (default 50) |
-| `get_debts` | Open debts in a wallet. | `walletId` |
-| `get_icons` | Icon pack metadata. | optional `pack` (default "default") |
-| `get_linked_providers` | Supported bank providers. | — |
-| `get_currencies` | Currency catalogue. | optional `limit` (default 100) |
-| `get_exchange_rates` | USD-based exchange rate snapshot. | — |
-| `get_other_config` | Miscellaneous runtime configuration. | — |
-
-## Tool Usage Examples
-
-Prompt examples, required vs optional fields, gotchas, and common multi-step patterns for every tool: **[docs/examples.md](docs/examples.md)**.
-
-## Library Usage
+## Library
 
 ```javascript
-import { MoneyloverClient } from './src/moneyloverClient.js';
+import { MoneyloverClient, CategoryType } from './src/index.js';
 
 const token = await MoneyloverClient.getToken(email, password);
-const client = new MoneyloverClient(token);
+const client = new MoneyloverClient(token, { timeZone: 'Australia/Adelaide' });
 
 const wallets = await client.getWallets();
-const txns = await client.getTransactions(walletId, '2026-01-01', '2026-04-30');
-await client.addTransaction({ walletId, categoryId, amount: '50000', date: '2026-04-18' });
-await client.editTransaction('txn-id', { amount: '60000', note: 'updated' });
-await client.deleteTransaction('txn-id');
+const categories = await client.listWalletCategories(wallets[0]._id);
+await client.addTransaction({
+  walletId: wallets[0]._id,
+  categoryId: categories.find((category) => category.type === CategoryType.EXPENSE).id,
+  amount: '-42.10',
+  note: 'Grocer',
+  date: '2026-04-18'
+});
 ```
 
-## Testing
+`CategoryType.INCOME` is `1` and `CategoryType.EXPENSE` is `2`.
 
-### Unit Tests
+## Security
 
-Mocked unit tests — no live API calls required:
+- The JWT is cached in `~/.moneylover-mcp/` (or `MONEYLOVER_TOKEN_CACHE_DIR`). The directory is mode `0700` and each token file is mode `0600`. Delete the directory to drop cached sessions.
+- Tool results and error text are redacted for JWTs, `password`, and token fields. `login` does not echo the access token.
+- Logs do not include the token or password.
+- Do not commit `.env`, `.mcp.json`, or a CSV export.
+
+## Tests
 
 ```bash
 npm test
+npm run lint
 ```
 
-### Integration Tests (mcp-tester)
+Tests mock `fetch`. They do not call Money Lover and do not need credentials. GitHub Actions runs lint, format check, unit tests, and `npm audit --audit-level=high` on Node 22.
 
-[mcp-tester](https://furydocs.io/mcp-tester/latest/guide/) is a ReAct-agent-based MCP testing framework. It starts the server, drives an LLM to call tools in response to natural-language prompts, and asserts the correct tools were called with correct arguments.
+`tests/mcp-tester/` contains optional live scenarios inherited from the upstream project. They need real credentials and an external tester, and CI does not run them.
 
-#### Install
+## What could not be checked against a live account
 
-```bash
-pipx install --index-url https://pypi.artifacts.furycloud.io/simple/ mcp-tester
-```
+No Money Lover credentials were available, so none of this was exercised against `web.moneylover.me`:
 
-#### Configure
-
-`tests/mcp-tester/mcps.json` — point at the local server with your credentials:
-
-```json
-{
-  "mcp-moneylover": {
-    "command": "node",
-    "args": ["/absolute/path/to/src/server.js"],
-    "transport": "stdio",
-    "env": {
-      "EMAIL": "your@email.com",
-      "PASSWORD": "your-password"
-    }
-  }
-}
-```
-
-#### Run
-
-```bash
-mcp-tester run-tests \
-  --mcps tests/mcp-tester/mcps.json \
-  --model gpt-4o-mini \
-  --concurrent-runs 3 \
-  tests/mcp-tester/read-tools.yaml
-```
-
-#### Results
-
-`tests/mcp-tester/read-tools.yaml` contains 25 integration tests covering every read tool:
-
-```
-total 25, success 25, failures 0
-```
-
-Key decisions that make the tests stable:
-
-- **No token parameter on read tools** — exposing an optional `token` field caused LLMs to inject wallet IDs into it. The server authenticates automatically via env vars.
-- **Response truncation** — several endpoints return hundreds of thousands of records from the shared MoneyLover database. Tools accept a `limit` parameter (default: 20–100) to keep LLM context under control.
-- **Dict wrapping** — all tool responses return a JSON object (never a bare array) so MCP framework validation passes.
-
-#### Write-Tool Tests (mcp-tester)
-
-Three additional YAML files test the full CRUD lifecycle for wallets, categories, and transactions across three sequential phases. Each phase runs all three resource types concurrently.
-
-| File | Phase | Tests |
-|------|-------|-------|
-| `write-create.yaml` | Create | `add_wallet`, `add_category`, `add_transaction` |
-| `write-edit.yaml` | Edit | `edit_wallet`, `edit_category`, `edit_transaction` |
-| `write-delete.yaml` | Delete | `delete_wallet`, `delete_category`, `delete_transaction` |
-
-Run phases in order — each depends on the previous:
-
-```bash
-# Phase 1: Create
-mcp-tester run-tests --mcps tests/mcp-tester/mcps.json --model gpt-4o-mini --concurrent-runs 3 tests/mcp-tester/write-create.yaml
-
-# Phase 2: Edit (after Phase 1 passes)
-mcp-tester run-tests --mcps tests/mcp-tester/mcps.json --model gpt-4o-mini --concurrent-runs 3 tests/mcp-tester/write-edit.yaml
-
-# Phase 3: Delete (after Phase 2 passes)
-mcp-tester run-tests --mcps tests/mcp-tester/mcps.json --model gpt-4o-mini --concurrent-runs 3 tests/mcp-tester/write-delete.yaml
-```
-
-Results across all three phases:
-
-```
-Phase 1 (Create): total 3, success 3, failures 0
-Phase 2 (Edit):   total 3, success 3, failures 0
-Phase 3 (Delete): total 3, success 3, failures 0
-```
-
-Key design decisions for write-tool tests:
-
-- **Discovery before mutation** — Edit and delete tests instruct the agent to first call a read tool (`get_wallets`, `get_categories`, `get_transactions`) to locate the target by name, then call the mutation tool. This mirrors real-world agent behaviour where IDs are not known in advance.
-- **`args: !any` for write tool assertions** — The framework requires exact arg matching. Write tools accept optional fields (`icon`, `with`, etc.) that the agent may include at its discretion; `!any` verifies the tool was called and succeeded without failing on harmless extras. Read-tool assertions can use exact arg matching because their schemas have no optional fields the LLM would add spontaneously.
-- **Predictable identifiers** — Test resources use fixed names (`MCP-Test-Wallet`, `MCP-Test-Category`) and a fixed note (`MCP test transaction`) so the agent can locate them by name during the edit and delete phases without needing to share state between test runs.
-- **Full-payload edit assertions** — `edit_transaction` is a full-replace operation; the test prompt instructs the agent to fetch the existing transaction first (`get_transactions`) and carry forward all current field values, only changing the note. This validates the multi-step reasoning the tool description requires.
-
-## Security Notes
-
-- Never commit real credentials or tokens.
-- Cached tokens live in `~/.moneylover-mcp/` restricted to the current user.
-- Delete that directory to revoke all cached sessions.
+- Whether `/category/list-all` returns only the signed-in user's categories or a much larger catalogue. `get_all_categories` drops rows whose `account` is another wallet, but it still has to download the response.
+- Whether `/transaction/list` or `/transaction/search` silently cap the number of rows on the server. The tools page whatever they receive and set `truncated` when the page is shorter than the list in hand.
+- Whether any account stores expense amounts as negative numbers. The sample responses in ferdhika31/moneylover-client-go and the add calls in leMaik/moneylover-cli and allexxis/moneylover-client use a positive magnitude plus category type. This server does the same.
+- The exact error code Money Lover returns for an expired JWT beyond the `user_unauthenticated` / HTTP 401 cases handled here.
+- Edit and delete field names beyond the payloads the upstream clients send (`account`, `category`, `amount`, `note`, `displayDate`, `with`, `_id`).
