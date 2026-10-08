@@ -1,0 +1,32 @@
+{
+  "note": "Trimmed from the 8 Oct 2026 lists. Names and ids only. Not the full 18-wallet catalogue.",
+  "listAll": [
+    { "_id": "B012AA1D774D42B6A4C68A84B5977C4C", "account": "ordi", "name": "Bank fees", "type": 2 },
+    { "_id": "B012AA1D774D42B6A4C68A84B5977C4C", "account": "tulip", "name": "Bank fees", "type": 2 },
+    {
+      "_id": "800FD392",
+      "account": "ordi",
+      "name": "Outgoing transfer",
+      "metadata": "IS_OUTGOING_TRANSFER",
+      "type": 2
+    },
+    {
+      "_id": "30160C1B",
+      "account": "ordi",
+      "name": "Incoming transfer",
+      "metadata": "IS_INCOMING_TRANSFER",
+      "type": 1
+    }
+  ],
+  "storedOrdi": [
+    { "_id": "FBD2B817A8DE4AE0B8BF8261006DCEC5", "account": "ordi", "name": "Bank fees", "type": 2 },
+    {
+      "_id": "30BC0A0E515245EBAC29F55BAFDA1780",
+      "account": "ordi",
+      "name": "Other Expense",
+      "metadata": "IS_OTHER_EXPENSE",
+      "type": 2
+    },
+    { "_id": "legacy", "account": "ordi", "name": "Old coffee", "type": 2, "isDelete": true }
+  ]
+}

@@ -16,10 +16,10 @@ Prompt: "Log in to Money Lover with email user@example.com and password secret12
 
 ```json
 Tool call: login({ email: "user@example.com", password: "secret123" })
-Response:  { "token": "eyJ..." }
+Response:  { "authenticated": true, "email": "user@example.com", "cached": true }
 ```
 
-> **Note:** The server caches tokens under `~/.moneylover-mcp/`. You only need `login` explicitly when building clients that manage their own token lifecycle.
+> **Note:** The server caches the JWT under `~/.moneylover-mcp/` and does not return it. Later tools use that cache. You only need `login` when the process was not started with `MONEYLOVER_EMAIL` and `MONEYLOVER_PASSWORD`.
 
 ---
 
@@ -144,14 +144,14 @@ Response:  { "_id": "590f65b...", "name": "Expenses", ... }
 
 Permanently deletes a wallet and all of its transactions.
 
-**Required:** `walletId`
+**Required:** `walletId`, `confirm: true`
 
 ```
 Prompt: "Delete wallet web1a2b3c..."
 ```
 
 ```json
-Tool call: delete_wallet({ walletId: "web1a2b3c..." })
+Tool call: delete_wallet({ walletId: "web1a2b3c...", confirm: true })
 Response:  {}
 ```
 
@@ -161,7 +161,7 @@ Response:  {}
 
 ### `get_categories`
 
-Returns categories scoped to a single wallet (wallet-specific IDs). Use these IDs with `add_transaction` and `edit_transaction` — the server resolves them to global IDs automatically.
+Returns the stored `/category/list` catalogue for one wallet. That list is larger than the add form. Use `list_categories` for ids `add_transaction` can send. The same add id can appear on more than one wallet; always pass `walletId` with it.
 
 ```
 Prompt: "List the categories in wallet 590f65bec16649948da1f4cfb94870c6."
@@ -169,12 +169,12 @@ Prompt: "List the categories in wallet 590f65bec16649948da1f4cfb94870c6."
 
 ```json
 Tool call: get_categories({ walletId: "590f65bec16649948da1f4cfb94870c6" })
-Response:  { "categories": [{ "_id": "225c6924...", "name": "Food & Drink", "type": 1 }, ...] }
+Response:  { "categories": [{ "_id": "225c6924...", "name": "Food & Drink", "type": 2, "typeName": "expense" }, ...] }
 ```
 
 ### `get_all_categories`
 
-Returns all categories across every wallet, using global IDs. Use these IDs when calling `edit_transaction` directly without the auto-resolve path.
+Returns categories across wallets. Prefer `list_categories` for the wallet you are writing to. An id whose `account` is a different wallet is rejected.
 
 ```
 Prompt: "Give me all my Money Lover categories."
@@ -190,15 +190,15 @@ Response:  { "categories": [{ "_id": "9c0aee57...", "name": "Food & Drink", "acc
 Creates a category inside a wallet. Use `get_icons` to browse valid icon names (format: `icon_N`, e.g. `icon_3`).
 
 **Required:** `walletId`, `name`, `icon`, `type`  
-**type:** `1` = expense, `2` = income
+**type:** `1` = income, `2` = expense
 
 ```
 Prompt: "In wallet 590f65bec16649948da1f4cfb94870c6, create an expense category named 'Gym' using icon 'icon_3'."
 ```
 
 ```json
-Tool call: add_category({ walletId: "590f65bec16649948da1f4cfb94870c6", name: "Gym", icon: "icon_3", type: 1 })
-Response:  { "_id": "web4f5a6b...", "name": "Gym", "type": 1 }
+Tool call: add_category({ walletId: "590f65bec16649948da1f4cfb94870c6", name: "Gym", icon: "icon_3", type: 2 })
+Response:  { "_id": "web4f5a6b...", "name": "Gym", "type": 2 }
 ```
 
 ### `edit_category`
@@ -221,14 +221,14 @@ Response:  { "_id": "web4f5a6b...", "name": "Fitness" }
 
 ### `delete_category`
 
-**Required:** `categoryId`
+**Required:** `categoryId`, `confirm: true`
 
 ```
 Prompt: "Delete category web4f5a6b..."
 ```
 
 ```json
-Tool call: delete_category({ categoryId: "web4f5a6b..." })
+Tool call: delete_category({ categoryId: "web4f5a6b...", confirm: true })
 Response:  {}
 ```
 
@@ -253,10 +253,10 @@ Response:  { "transactions": [{ "_id": "bfa8b033...", "amount": 50000, "note": "
 
 ### `add_transaction`
 
-Creates a transaction. `categoryId` can be a wallet-specific ID (from `get_categories`) or a global ID (from `get_all_categories`) — the server resolves wallet-specific IDs to global IDs automatically before posting.
+Creates a transaction. `categoryId` is an `addId` from `list_categories` for this wallet. The same add id may exist on other wallets; `walletId` selects the row. A name is matched only in that wallet’s add picker. A stored catalogue id the picker does not offer is refused with `CATEGORY_NOT_USABLE` and nothing is posted. A missing name is not replaced with Other expense.
 
-**Required:** `walletId`, `categoryId`, `amount` (string), `date` (YYYY-MM-DD)  
-**Optional:** `note`, `with` (array of party names)
+**Required:** `walletId`, `categoryId` or `category`, `amount` (string), `date` (YYYY-MM-DD)  
+**Optional:** `note`, `with`, `excludeReport`, `eventId`, `reminder`, `longitude`, `latitude`, `addressName`, `image` (an existing photo reference; this server does not upload a file, and the website limit is under 2MB)
 
 ```
 Prompt: "In wallet 590f65bec16649948da1f4cfb94870c6, add a 50000 COP food expense for today (2026-04-18) with note 'Lunch', category 225c6924c4f143909851daeb75627928."
@@ -273,50 +273,42 @@ Tool call: add_transaction({
 Response:  { "_id": "webXXX...", "amount": 50000, "note": "Lunch", "displayDate": "2026-04-18" }
 ```
 
-> **Category ID resolution:** Passing a wallet-specific category ID is safe — `add_transaction` resolves it internally. If resolution fails (category not found in either list), the original ID is used as a fallback.
+> **Category id:** Pass `id` or `addId` from `list_categories` for this wallet. That is the add-picker id. Search results show the stored id. `includeUnusable: true` puts `storedId` and `storedIds` on the picker row so those stored ids can be matched back. Only picker categories can be used for a new transaction. A stored name that matches two picker rows is `ambiguous` and includes the candidate add ids. A name that matches a parent and a sub-category returns both ids and writes nothing.
 
 ### `edit_transaction`
 
-Updates a transaction. The Money Lover API is **full-replace** — every field must be supplied on every edit. Fetch the current transaction with `get_transactions` first if you only have the ID.
+Updates a transaction. The API replaces the stored row, so the server loads the current transaction first and sends back `exclude_report`, `event`, image, reminder, location, parties, and any debt parent along with your changes.
 
-`categoryId` should be the **global** category ID from the transaction's `category._id` field (as returned by `get_transactions`), or from `get_all_categories`. The server resolves wallet-specific IDs here too.
-
-**Required:** `transactionId`, `walletId`, `categoryId`, `amount`, `date`  
-**Optional:** `note`, `with`
+**Required:** `transactionId`  
+**Needed to find the row:** `walletId` and `currentDate` (the day it is on now)  
+**Optional:** `categoryId`, `amount`, `date`, `note`, `with`, `excludeReport`, `eventId`
 
 ```
 Prompt: "Update transaction bfa8b03330b24579849acdf50db11304 — change note to 'Team lunch'. Keep all other fields."
 ```
 
-Agent flow:
-1. Call `get_transactions` with `walletId` + date range to fetch current values.
-2. Extract `_id`, `account` (walletId), `category._id` (global categoryId), `amount`, `displayDate`.
-3. Call `edit_transaction` with all fields, only changing `note`.
-
 ```json
 Tool call: edit_transaction({
   transactionId: "bfa8b03330b24579849acdf50db11304",
   walletId:      "590f65bec16649948da1f4cfb94870c6",
-  categoryId:    "9c0aee5796c345d087c91c0ed5bcc689",
-  amount:        "50000",
-  date:          "2026-04-15",
+  currentDate:   "2026-04-15",
   note:          "Team lunch"
 })
 Response:  {}
 ```
 
-> **Null response is success** — a `null` / empty `{}` response from `edit_transaction` means the update was accepted. An error object indicates failure.
+> Pass `walletId` and `currentDate` so the lookup can find the row. Omit a field to keep it. A `null` or `{}` response means the update was accepted.
 
 ### `delete_transaction`
 
-**Required:** `transactionId`
+**Required:** `transactionId`, `confirm: true`
 
 ```
 Prompt: "Delete transaction bfa8b03330b24579849acdf50db11304."
 ```
 
 ```json
-Tool call: delete_transaction({ transactionId: "bfa8b03330b24579849acdf50db11304" })
+Tool call: delete_transaction({ transactionId: "bfa8b03330b24579849acdf50db11304", confirm: true })
 Response:  {}
 ```
 
@@ -521,14 +513,22 @@ Response:  { "config": { ... } }
 2. add_transaction({ walletId: "590f65b...", categoryId: "225c6924...", amount: "35000", date: "2026-04-18", note: "Groceries" })
 ```
 
-### Edit a transaction safely (full-replace)
+### Edit a transaction without wiping the other fields
 
 ```
-1. get_transactions({ walletId: "590f65b...", startDate: "2026-04-15", endDate: "2026-04-15" })
-   → find the transaction → copy _id, account, category._id, amount, displayDate
-
-2. edit_transaction({ transactionId: "bfa8b...", walletId: "590f65b...", categoryId: "9c0aee...", amount: "50000", date: "2026-04-15", note: "Updated note" })
+1. edit_transaction({
+     transactionId: "bfa8b...",
+     walletId: "590f65b...",
+     currentDate: "2026-04-15",
+     note: "Updated note"
+   })
 ```
+
+The server reads the row and writes the other fields back.
+
+### Australian dollars
+
+`get_currencies` is the catalogue. AUD is currency id 20.
 
 ### Create a wallet with the correct currency ID
 

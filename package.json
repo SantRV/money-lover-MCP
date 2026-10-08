@@ -1,11 +1,18 @@
 {
-  "name": "@ferdhika31/moneylover-mcp",
-  "version": "0.0.3",
-  "description": "MCP server wrapping the Money Lover REST API",
+  "name": "money-lover-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for the unofficial Money Lover API. Forked for reliable statement import.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ferdhika31/moneylover-mcp.git"
+    "url": "git+https://github.com/SantRV/money-lover-MCP.git"
   },
+  "homepage": "https://github.com/SantRV/money-lover-MCP#readme",
+  "bugs": {
+    "url": "https://github.com/SantRV/money-lover-MCP/issues"
+  },
+  "author": "SantRV",
+  "license": "ISC",
   "type": "module",
   "main": "src/index.js",
   "exports": "./src/index.js",
@@ -15,23 +22,21 @@
   "scripts": {
     "start": "node ./src/server.js",
     "test": "vitest run",
-    "release": "semantic-release"
+    "lint": "eslint src tests",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
-  "author": "Ferdhika Yudira",
-  "license": "ISC",
   "engines": {
     "node": ">=22.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.2",
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@semantic-release/commit-analyzer": "^13.0.1",
-    "@semantic-release/github": "^12.0.0",
-    "@semantic-release/npm": "^13.1.1",
-    "@semantic-release/release-notes-generator": "^14.1.0",
-    "semantic-release": "^25.0.1",
-    "vitest": "^1.6.0"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.12.0",
+    "prettier": "^3.6.2",
+    "vitest": "^5.0.3"
   }
 }
