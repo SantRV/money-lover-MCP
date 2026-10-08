@@ -1,7 +1,9 @@
 import { prepareAmount, amountCents, formatAmount, parseAmount, wireAmount } from './amounts.js';
 import {
   CategoryType,
+  categoryIdForAdd,
   coerceCategoryType,
+  listAllCategoriesForWallet,
   selectCategory,
   summarizeCategory,
   systemCategoryLabel,
@@ -133,7 +135,9 @@ const finiteOr = (value, fallback) => {
  * (saveTransaction → transInfo → Ki.postData).
  * Headers on that call are Accept, dataformat, Content-Type application/json,
  * and authorization AuthJWT. It does not send client, device, or version headers
- * (those are only on the Revo API and image upload). Amount is a JSON number.
+ * (those are only on the Revo API and image upload). `category` is the `_id`
+ * from POST /category/list-all for this wallet, not the id /category/list stores.
+ * Amount is a JSON number.
  * displayDate is YYYY-MM-DD. The empty location, event, image, and exclude_report
  * fields are always present; remind is not sent on add.
  */
@@ -425,7 +429,20 @@ export class MoneyloverClient {
 
   async listWalletCategories(walletId) {
     const categories = await this.#walletCategories(walletId);
-    return categories.map(summarizeCategory);
+    let addRows = [];
+    try {
+      addRows = listAllCategoriesForWallet(await this.#globalCategories(), walletId);
+    } catch {
+      addRows = [];
+    }
+    return categories.map((category) => {
+      const summary = summarizeCategory(category);
+      const mapped = categoryIdForAdd({ category, id: category._id }, addRows);
+      if (mapped?.id) {
+        summary.addId = mapped.id;
+      }
+      return summary;
+    });
   }
 
   async addCategory(params) {
@@ -530,24 +547,36 @@ export class MoneyloverClient {
       this.#globalCategoriesCache = sessionGlobalCategories;
       return sessionGlobalCategories;
     }
-    try {
-      this.#globalCategoriesCache = unwrapList(await this.getAllCategories());
-    } catch {
-      this.#globalCategoriesCache = [];
-    }
-    sessionGlobalCategories = this.#globalCategoriesCache;
-    return this.#globalCategoriesCache;
+    const list = unwrapList(await this.getAllCategories());
+    this.#globalCategoriesCache = list;
+    sessionGlobalCategories = list;
+    return list;
   }
 
   async #resolveCategory(walletId, { categoryId, categoryName, direction }) {
     const walletList = await this.#walletCategories(walletId);
-    const id = typeof categoryId === 'string' ? categoryId.trim() : '';
-    const onThisWallet = id && walletList.some((category) => category._id === id);
-    if (!id || onThisWallet) {
-      return selectCategory(walletList, [], walletId, { categoryId, categoryName, direction });
+    const addRows = listAllCategoriesForWallet(await this.#globalCategories(), walletId);
+    const selected = selectCategory(walletList, addRows, walletId, { categoryId, categoryName, direction });
+    const mapped = categoryIdForAdd(selected, addRows);
+    if (!mapped?.id) {
+      const label = selected.category?.name
+        ? `${selected.category.name} [${selected.id}]`
+        : selected.id || categoryName || 'this category';
+      if (mapped?.ambiguous) {
+        const candidates = mapped.candidates.map((category) => `${category.name} [${category._id}]`).join(', ');
+        throw new Error(
+          `More than one /category/list-all category matches ${label} in this wallet. POST /transaction/add needs one of those ids. Candidates: ${candidates}`
+        );
+      }
+      throw new Error(
+        `No /category/list-all category for this wallet matches ${label}. The website posts that id on /transaction/add, and list_categories shows the id the server stores afterwards. Nothing was posted.`
+      );
     }
-    const globalList = await this.#globalCategories();
-    return selectCategory(walletList, globalList, walletId, { categoryId, categoryName, direction });
+    return {
+      category: selected.category ?? mapped.category,
+      id: mapped.id,
+      source: 'list-all'
+    };
   }
 
   async prepareTransaction(params) {
@@ -750,10 +779,12 @@ export class MoneyloverClient {
   }
 
   async deleteTransaction(id, { dryRun = false, deleteRelated = false } = {}) {
-    const payload = { _id: ensureString(id, 'transactionId') };
-    if (deleteRelated) {
-      payload.delRelated = true;
-    }
+    // The add response assigns _id (the web client copies data._id, often prefixed "web").
+    // The client does not generate that id. Delete always sends delRelated, as the dialog does.
+    const payload = {
+      _id: ensureString(id, 'transactionId'),
+      delRelated: deleteRelated === true
+    };
     if (dryRun) {
       return { dryRun: true, endpoint: '/transaction/delete', payload };
     }
@@ -908,7 +939,8 @@ export class MoneyloverClient {
         `Wallet ${walletId} has more than one "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
       );
     }
-    return matches[0]._id;
+    const resolved = await this.#resolveCategory(walletId, { categoryId: matches[0]._id });
+    return resolved.id;
   }
 
   async transferMoney(params) {

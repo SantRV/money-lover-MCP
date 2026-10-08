@@ -185,3 +185,85 @@ export const selectCategory = (walletList, globalList, walletId, { categoryId, c
     `Category name "${label}" matches more than one category in this wallet. Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
   );
 };
+
+const parentIdOf = (category) => {
+  const parent = category?.parent;
+  if (parent && typeof parent === 'object' && parent._id) {
+    return String(parent._id);
+  }
+  if (typeof parent === 'string' && parent) {
+    return parent;
+  }
+  if (typeof category?.parentId === 'string' && category.parentId) {
+    return category.parentId;
+  }
+  return '';
+};
+
+/**
+ * Rows the add dialog can pick: POST /category/list-all, then
+ * `account === walletId`. The web app does not treat a blank account as this wallet.
+ */
+export const listAllCategoriesForWallet = (globalList, walletId) =>
+  (Array.isArray(globalList) ? globalList : []).filter((category) => accountOf(category) === walletId);
+
+const sameText = (left, right) => String(left ?? '').toLowerCase() === String(right ?? '').toLowerCase();
+
+const narrow = (rows, predicate) => {
+  const matched = rows.filter(predicate);
+  return matched.length > 0 ? matched : rows;
+};
+
+/**
+ * Id to send as `category` on POST /transaction/add.
+ * The add dialog reads `category/listAllCategory` (POST /category/list-all),
+ * keeps rows for this wallet, and posts that row's `_id`. The API stores a
+ * different id, which is what POST /category/list and list_categories return.
+ * `selected` is a selectCategory result, or `{ id, category }`.
+ * Returns `{ id, category }` or `{ ambiguous: true, candidates }`, or null
+ * when this wallet has no list-all row to send.
+ */
+export const categoryIdForAdd = (selected, listAllForWallet) => {
+  const walletCategory = selected?.category?._id || selected?.category?.name ? selected.category : null;
+  const walletId = accountOf(walletCategory);
+  let rows = Array.isArray(listAllForWallet) ? listAllForWallet : [];
+  if (walletId) {
+    rows = rows.filter((category) => accountOf(category) === walletId);
+  }
+  const selectedId = selected?.id ?? selected?._id ?? '';
+  const direct = rows.find((category) => category?._id === selectedId);
+  if (direct) {
+    return { id: direct._id, category: direct };
+  }
+
+  if (!walletCategory) {
+    return null;
+  }
+
+  const exactName = rows.filter((category) => String(category?.name ?? '') === String(walletCategory.name ?? ''));
+  let candidates =
+    exactName.length > 0 ? exactName : rows.filter((category) => sameText(category?.name, walletCategory.name));
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (walletCategory.type != null) {
+    candidates = narrow(candidates, (category) => Number(category.type) === Number(walletCategory.type));
+  }
+  const metadata = metadataKey(walletCategory.metadata);
+  if (metadata) {
+    candidates = narrow(candidates, (category) => metadataKey(category.metadata) === metadata);
+  }
+  const parentId = parentIdOf(walletCategory);
+  const parentName = parentNameOf(walletCategory);
+  if (parentId || parentName) {
+    candidates = narrow(
+      candidates,
+      (category) =>
+        (parentId && parentIdOf(category) === parentId) || (parentName && sameText(parentNameOf(category), parentName))
+    );
+  }
+  if (candidates.length === 1) {
+    return { id: candidates[0]._id, category: candidates[0] };
+  }
+  return { ambiguous: true, candidates };
+};

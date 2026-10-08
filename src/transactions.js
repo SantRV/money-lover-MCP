@@ -5,6 +5,17 @@ import { appendImportLog, newBatchId, stripBatchMarker, withBatchMarker } from '
 
 const MAX_BATCH = 200;
 
+export const errorFromTransactionRow = (row) => {
+  const error = new Error(row?.message || 'Unknown error');
+  if (row?.name) {
+    error.name = row.name;
+  }
+  if (row?.code != null) {
+    error.code = row.code;
+  }
+  return error;
+};
+
 const fingerprintsFrom = (rows, timeZone) =>
   rows
     .map((transaction) => fingerprintTransaction(transaction, { timeZone }))
@@ -166,11 +177,20 @@ export const createTransactions = async (client, options) => {
         warnings: prepared.warnings
       });
     } catch (error) {
-      results.push({
+      const result = {
         index,
         status: 'error',
         message: error instanceof Error ? error.message : String(error)
-      });
+      };
+      if (error && typeof error === 'object') {
+        if (error.code != null) {
+          result.code = error.code;
+        }
+        if (error.name && error.name !== 'Error') {
+          result.name = error.name;
+        }
+      }
+      results.push(result);
     }
   }
 

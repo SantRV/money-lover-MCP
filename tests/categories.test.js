@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categoryTypeName, selectCategory, summarizeCategory } from '../src/categories.js';
+import { categoryIdForAdd, categoryTypeName, selectCategory, summarizeCategory } from '../src/categories.js';
 
 describe('categories', () => {
   const wallet = [
@@ -67,6 +67,66 @@ describe('categories', () => {
   it('does not substitute Other expense when the requested name is missing', () => {
     const list = [{ _id: 'other', name: 'Other expense', type: 2, account: 'w1', metadata: 'IS_OTHER_EXPENSE' }];
     expect(() => selectCategory(list, [], 'w1', { categoryName: 'Coffee' })).toThrow(/No category named "Coffee"/);
+  });
+
+  it('maps a stored category id to the list-all id for the same wallet', () => {
+    const mapped = categoryIdForAdd(
+      {
+        id: 'FBD2B817A8DE4AE0B8BF8261006DCEC5',
+        category: { _id: 'FBD2B817A8DE4AE0B8BF8261006DCEC5', name: 'Bank fees', type: 2, account: 'w1' }
+      },
+      [
+        { _id: 'B012AA1D774D42B6A4C68A84B5977C4C', name: 'Bank fees', type: 2, account: 'w1' },
+        { _id: 'other', name: 'Bank fees', type: 2, account: 'w9' }
+      ]
+    );
+    expect(mapped.id).toBe('B012AA1D774D42B6A4C68A84B5977C4C');
+  });
+
+  it('keeps a list-all id that was passed in', () => {
+    const mapped = categoryIdForAdd(
+      {
+        id: 'B012AA1D774D42B6A4C68A84B5977C4C',
+        category: { _id: 'B012AA1D774D42B6A4C68A84B5977C4C', name: 'Bank fees', type: 2, account: 'w1' }
+      },
+      [{ _id: 'B012AA1D774D42B6A4C68A84B5977C4C', name: 'Bank fees', type: 2, account: 'w1' }]
+    );
+    expect(mapped.id).toBe('B012AA1D774D42B6A4C68A84B5977C4C');
+  });
+
+  it('uses the parent name when two list-all rows share a name', () => {
+    const mapped = categoryIdForAdd(
+      {
+        id: 'stored',
+        category: {
+          _id: 'stored',
+          name: 'Groceries',
+          type: 2,
+          account: 'w1',
+          parent: { name: 'Food' }
+        }
+      },
+      [
+        { _id: 'add-1', name: 'Groceries', type: 2, account: 'w1', parent: { name: 'Food' } },
+        { _id: 'add-2', name: 'Groceries', type: 2, account: 'w1', parent: { name: 'Household' } }
+      ]
+    );
+    expect(mapped.id).toBe('add-1');
+  });
+
+  it('asks for an add id when two list-all rows share the name', () => {
+    const mapped = categoryIdForAdd(
+      {
+        id: 'stored',
+        category: { _id: 'stored', name: 'Groceries', type: 2, account: 'w1' }
+      },
+      [
+        { _id: 'add-1', name: 'Groceries', type: 2, account: 'w1', parent: { name: 'Food' } },
+        { _id: 'add-2', name: 'Groceries', type: 2, account: 'w1', parent: { name: 'Household' } }
+      ]
+    );
+    expect(mapped.ambiguous).toBe(true);
+    expect(mapped.candidates.map((category) => category._id)).toEqual(['add-1', 'add-2']);
   });
 
   it('refuses a category from another wallet', () => {

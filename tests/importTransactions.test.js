@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MoneyloverClient } from '../src/moneyloverClient.js';
-import { createTransactions } from '../src/transactions.js';
+import { MoneyloverApiError, MoneyloverClient } from '../src/moneyloverClient.js';
+import { createTransactions, errorFromTransactionRow } from '../src/transactions.js';
+import { __test as serverTest } from '../src/server.js';
 
 const json = (data) =>
   new Response(JSON.stringify({ error: 0, data }), {
@@ -55,6 +56,7 @@ describe('createTransactions', () => {
     global.fetch
       .mockResolvedValueOnce(json({ transactions: [] }))
       .mockResolvedValueOnce(json(walletCategories))
+      .mockResolvedValueOnce(json(globalCategories))
       .mockResolvedValueOnce(json({ _id: 'created-1' }));
 
     const summary = await createTransactions(new MoneyloverClient('token', { timeZone: 'Australia/Adelaide' }), {
@@ -71,6 +73,7 @@ describe('createTransactions', () => {
     const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
     expect(JSON.parse(post[1].body).displayDate).toBe('2026-04-18');
     expect(JSON.parse(post[1].body).amount).toBe(12.5);
+    expect(JSON.parse(post[1].body).category).toBe('global-food');
   });
 
   it('previews a batch without posting', async () => {
@@ -112,5 +115,44 @@ describe('createTransactions', () => {
     expect(summary.created).toBe(1);
     expect(summary.results[0].status).toBe('error');
     expect(summary.results[1].status).toBe('created');
+  });
+
+  it('keeps TIMEOUT and CLOUDFLARE on a failed add row', async () => {
+    const client = {
+      prepareTransaction: async () => ({
+        payload: { note: '', category: 'add-id', amount: 0.01 },
+        date: '2026-10-08',
+        cents: 1,
+        amountText: '0.01',
+        note: '',
+        categoryId: 'add-id',
+        direction: 'expense',
+        warnings: []
+      }),
+      addPreparedTransaction: async () => {
+        throw new MoneyloverApiError('POST /transaction/add did not answer within 20000ms', { code: 'TIMEOUT' });
+      }
+    };
+    const summary = await createTransactions(client, {
+      walletId: 'w1',
+      skipDuplicates: false,
+      transactions: [{ date: '2026-10-08', amount: '0.01', note: '', categoryId: 'stored' }]
+    });
+    expect(summary.results[0]).toMatchObject({ status: 'error', code: 'TIMEOUT', name: 'MoneyloverApiError' });
+    const formatted = serverTest.formatError(errorFromTransactionRow(summary.results[0]));
+    expect(formatted.structuredContent.code).toBe('TIMEOUT');
+    expect(formatted.structuredContent.error).toBe('MoneyloverApiError');
+    expect(formatted.content[0].text).toMatch(/TIMEOUT/);
+
+    const cloudflare = errorFromTransactionRow({
+      message: 'HTTP 524',
+      code: 'CLOUDFLARE',
+      name: 'MoneyloverApiError'
+    });
+    const cloudflareFormatted = serverTest.formatError(cloudflare);
+    expect(cloudflareFormatted.structuredContent).toMatchObject({
+      error: 'MoneyloverApiError',
+      code: 'CLOUDFLARE'
+    });
   });
 });

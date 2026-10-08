@@ -32,7 +32,7 @@ import { clip, redact } from './redact.js';
 import { pageItems } from './paging.js';
 import { summarizeCategory, unwrapList } from './categories.js';
 import { rowsFromBankCsv } from './csv.js';
-import { createTransactions } from './transactions.js';
+import { createTransactions, errorFromTransactionRow } from './transactions.js';
 import { assertConfirm } from './safety.js';
 import { buildSearchFilter, pageSearchResult, SEARCH_PAGE_SIZE } from './searchFilters.js';
 import { undoImport } from './importUndo.js';
@@ -610,13 +610,14 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'List Categories',
       description:
-        'Compact category list for one wallet, grouped into income (type 1) and expense (type 2), including parentId when the category is a sub-category. Map a statement payee to an id from this wallet. The same name in another wallet is a different category. Some wallets have no Other expense category.',
+        'Compact category list for one wallet, grouped into income (type 1) and expense (type 2), including parentId when the category is a sub-category. id is the stored category id. addId, when present, is the /category/list-all id the website posts on /transaction/add for this wallet. add_transaction accepts either id and sends addId. The same name in another wallet is a different category. Some wallets have no Other expense category.',
       inputSchema: walletIdArgument
     },
     guard(async ({ walletId }) => {
       const categories = await runWithClient(undefined, (client) => client.listWalletCategories(walletId));
       const project = (category) => ({
         id: category.id,
+        ...(category.addId ? { addId: category.addId } : {}),
         name: category.name,
         type: category.type,
         typeName: category.typeName,
@@ -673,14 +674,16 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Transaction',
       description:
-        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2) from this wallet. categoryId is that wallet’s category id, and category may be a name that is unique in this wallet. date YYYY-MM-DD is not timezone-shifted. Optional fields match the website form: with, reminder, location, event, an existing photo reference, and exclude from report. This server does not upload a photo file. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
+        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2) from this wallet. categoryId may be the stored id from list_categories or the addId from /category/list-all for this wallet; the posted category is the list-all id. category may be a name that is unique in this wallet. date YYYY-MM-DD is not timezone-shifted. Optional fields match the website form: with, reminder, location, event, an existing photo reference, and exclude from report. This server does not upload a photo file. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
       inputSchema: {
         ...walletIdArgument,
         categoryId: z
           .string()
           .min(1)
           .optional()
-          .describe('Category id from list_categories or get_categories for this wallet'),
+          .describe(
+            'Stored category id from list_categories, or the addId from /category/list-all for this wallet. The request sends the list-all id.'
+          ),
         category: z
           .string()
           .min(1)
@@ -715,7 +718,7 @@ const registerMoneyloverTools = (server) => {
       );
       const row = summary.results[0];
       if (row.status === 'error') {
-        throw new Error(row.message);
+        throw errorFromTransactionRow(row);
       }
       if (row.status === 'skipped_duplicate') {
         return { skipped: true, reason: 'duplicate', ...row };
@@ -1306,7 +1309,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Delete Transaction',
       description:
-        'Permanently delete a transaction. Requires confirm: true. Pass dryRun: true to preview without deleting. Set deleteRelated: true to also delete the other leg of a transfer (the web app sends delRelated).',
+        'Permanently delete a transaction. Requires confirm: true. Pass dryRun: true to preview without deleting. The body is {_id, delRelated}. delRelated is false unless deleteRelated is true. The server assigns the transaction id (often prefixed web) when the transaction is created.',
       inputSchema: {
         transactionId: z.string().min(1).describe('Transaction identifier'),
         deleteRelated: z

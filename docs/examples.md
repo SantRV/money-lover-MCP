@@ -161,7 +161,7 @@ Response:  {}
 
 ### `get_categories`
 
-Returns the category tree for one wallet. Use these ids with `add_transaction` and `edit_transaction` for that same wallet. Each wallet has its own tree. A name can appear under more than one parent, and some wallets have no Other expense category. Do not reuse an id from another wallet.
+Returns the category tree for one wallet. `list_categories` also returns `addId` when `/category/list-all` has a matching row for this wallet. `add_transaction` posts `addId`. Each wallet has its own tree. A name can appear under more than one parent, and some wallets have no Other expense category. Do not reuse an id from another wallet.
 
 ```
 Prompt: "List the categories in wallet 590f65bec16649948da1f4cfb94870c6."
@@ -253,7 +253,7 @@ Response:  { "transactions": [{ "_id": "bfa8b033...", "amount": 50000, "note": "
 
 ### `add_transaction`
 
-Creates a transaction. `categoryId` is an id from `list_categories` or `get_categories` for this wallet. A category name is matched only inside that wallet. The id is not swapped for a category on another wallet, and a missing name is not replaced with Other expense.
+Creates a transaction. `categoryId` may be the stored id from `list_categories` or the `addId` from `/category/list-all` for this wallet. The posted `category` is the list-all id, which is what the website sends. A category name is matched only inside that wallet. An id from another wallet is rejected, and a missing name is not replaced with Other expense.
 
 **Required:** `walletId`, `categoryId` or `category`, `amount` (string), `date` (YYYY-MM-DD)  
 **Optional:** `note`, `with`, `excludeReport`, `eventId`, `reminder`, `longitude`, `latitude`, `addressName`, `image` (an existing photo reference; this server does not upload a file, and the website limit is under 2MB)
@@ -273,7 +273,7 @@ Tool call: add_transaction({
 Response:  { "_id": "webXXX...", "amount": 50000, "note": "Lunch", "displayDate": "2026-04-18" }
 ```
 
-> **Category id:** Pass the id from this wallet’s category list. If that id is not on the wallet, the call warns and sends it unchanged. A name that matches a parent and a sub-category returns both ids and writes nothing.
+> **Category id:** Pass `id` or `addId` from `list_categories` for this wallet. The request body uses the `/category/list-all` id. If that list has no row for this wallet, nothing is posted. A name that matches a parent and a sub-category returns both ids and writes nothing.
 
 ### `edit_transaction`
 

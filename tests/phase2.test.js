@@ -143,11 +143,11 @@ describe('phase 2 API behaviour', () => {
     const body = JSON.parse(post[1].body);
     expect(body.action).toBe('transfermoney');
     expect(body.transactions).toHaveLength(3);
-    expect(body.transactions[0]).toMatchObject({ account: 'from', category: 'out-local', amount: 40, related: true });
-    expect(body.transactions[1]).toMatchObject({ account: 'to', category: 'in-local', amount: 40, related: true });
+    expect(body.transactions[0]).toMatchObject({ account: 'from', category: 'out', amount: 40, related: true });
+    expect(body.transactions[1]).toMatchObject({ account: 'to', category: 'in', amount: 40, related: true });
     expect(body.transactions[2]).toMatchObject({
       account: 'from',
-      category: 'fee-local',
+      category: 'fee',
       amount: 1.5,
       isFee: true,
       related: true
@@ -180,7 +180,7 @@ describe('phase 2 API behaviour', () => {
     const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
     expect(JSON.parse(post[1].body)).toMatchObject({
       account: 'w1',
-      category: 'other-local',
+      category: 'other',
       amount: 30,
       displayDate: '2026-04-18',
       note: 'Balance adjustment'
@@ -205,7 +205,7 @@ describe('phase 2 API behaviour', () => {
     expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
 
-  it('adjusts with an explicit category from this wallet when Other expense is absent', async () => {
+  it('does not adjust with a stored category id that has no list-all id on this wallet', async () => {
     global.fetch = vi.fn(async (url) => {
       const path = String(url);
       if (path.endsWith('/wallet/balance')) {
@@ -220,14 +220,15 @@ describe('phase 2 API behaviour', () => {
       return json({ _id: 'adj-2' });
     });
 
-    await new MoneyloverClient('t').adjustBalance({
-      walletId: 'w1',
-      balance: 50,
-      date: '2026-04-18',
-      categoryId: 'food'
-    });
-    const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
-    expect(JSON.parse(post[1].body).category).toBe('food');
+    await expect(
+      new MoneyloverClient('t').adjustBalance({
+        walletId: 'w1',
+        balance: 50,
+        date: '2026-04-18',
+        categoryId: 'food'
+      })
+    ).rejects.toThrow(/list-all/);
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
 
   it('reads a balance array and signs income and expense', () => {
@@ -339,6 +340,7 @@ describe('phase 2 API behaviour', () => {
     global.fetch = vi
       .fn()
       .mockResolvedValueOnce(json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]))
+      .mockResolvedValueOnce(json([{ _id: 'cat-add', account: 'w1', name: 'Food', type: 2 }]))
       .mockResolvedValueOnce(new Response('error code: 524', { status: 524 }));
 
     const error = await new MoneyloverClient('t', { requestTimeout: 150000 })
@@ -367,11 +369,16 @@ describe('phase 2 API behaviour', () => {
       if (String(url).endsWith('/category/list')) {
         return json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]);
       }
+      if (String(url).endsWith('/category/list-all')) {
+        return json([{ _id: 'cat-add', account: 'w1', name: 'Food', type: 2 }]);
+      }
       return json({ _id: 'new' });
     });
     const params = { walletId: 'w1', categoryId: 'cat', amount: '1', date: '2026-10-08', dryRun: true };
+    const first = await new MoneyloverClient('t').addTransaction(params);
     await new MoneyloverClient('t').addTransaction(params);
-    await new MoneyloverClient('t').addTransaction(params);
+    expect(first.payload.category).toBe('cat-add');
     expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list'))).toHaveLength(1);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
   });
 });
