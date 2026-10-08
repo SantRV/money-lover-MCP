@@ -70,7 +70,7 @@ export const createTransactions = async (client, options) => {
   const dryRun = options.dryRun === true;
   const amountMode = options.amountMode === 'signed' ? 'signed' : 'magnitude';
   const timeZone = options.timeZone;
-  const markBatch = options.markBatch === true || Boolean(options.batchId);
+  const markBatch = options.markBatch === false ? false : options.markBatch === true || Boolean(options.batchId);
   const batchId = markBatch ? (options.batchId ?? newBatchId()) : null;
 
   let existing = [];
@@ -199,6 +199,12 @@ export const createTransactions = async (client, options) => {
     dryRun,
     skipDuplicates,
     batchId,
+    ...(options.markBatch === false
+      ? {
+          warning:
+            'Notes were saved without an ml-batch marker and no import log was written. undo_import cannot find this batch.'
+        }
+      : {}),
     created: count('created'),
     skipped: count('skipped_duplicate'),
     failed: count('error'),

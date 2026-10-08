@@ -2,7 +2,12 @@ import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MoneyloverClient, MoneyloverApiError, timeoutForRequest } from '../src/moneyloverClient.js';
+import {
+  MoneyloverClient,
+  MoneyloverApiError,
+  clearCategorySession,
+  timeoutForRequest
+} from '../src/moneyloverClient.js';
 import { isAuthError, isDeviceError } from '../src/authError.js';
 import { buildSearchFilter, pageSearchResult } from '../src/searchFilters.js';
 import { readBalance, signedTransactionDelta, summarizeTransactionTotals } from '../src/balance.js';
@@ -156,6 +161,60 @@ describe('phase 2 API behaviour', () => {
     });
   });
 
+  it('loads the wallet list once per process and skips it when both notes are set', async () => {
+    global.fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/category/list-all')) {
+        return json([
+          { _id: 'out', account: 'from', name: 'Out', metadata: 'IS_OUTGOING_TRANSFER', type: 2 },
+          { _id: 'in', account: 'to', name: 'In', metadata: 'IS_INCOMING_TRANSFER', type: 1 }
+        ]);
+      }
+      if (path.endsWith('/wallet/list')) {
+        return json([
+          { _id: 'from', name: 'Bank' },
+          { _id: 'to', name: 'Card' }
+        ]);
+      }
+      return json({ ok: true });
+    });
+
+    const walletListCalls = () =>
+      global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/wallet/list')).length;
+
+    const first = await new MoneyloverClient('t').transferMoney({
+      fromWalletId: 'from',
+      toWalletId: 'to',
+      amount: '10',
+      date: '2026-04-18',
+      dryRun: true
+    });
+    const second = await new MoneyloverClient('t').transferMoney({
+      fromWalletId: 'from',
+      toWalletId: 'to',
+      amount: '11',
+      date: '2026-04-18',
+      dryRun: true
+    });
+    expect(first.payload.transactions.map((leg) => leg.note)).toEqual(['Transfer to Card', 'Transfer from Bank']);
+    expect(second.payload.transactions[0].note).toBe('Transfer to Card');
+    expect(walletListCalls()).toBe(1);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
+
+    clearCategorySession();
+    const noted = await new MoneyloverClient('t').transferMoney({
+      fromWalletId: 'from',
+      toWalletId: 'to',
+      amount: '12',
+      date: '2026-04-18',
+      fromNote: 'Paid card',
+      toNote: 'From bank',
+      dryRun: true
+    });
+    expect(noted.payload.transactions.map((leg) => leg.note)).toEqual(['Paid card', 'From bank']);
+    expect(walletListCalls()).toBe(1);
+  });
+
   it('adjusts a balance with the Other expense category when the wallet is high', async () => {
     global.fetch = vi.fn(async (url) => {
       const path = String(url);
@@ -266,6 +325,30 @@ describe('phase 2 API behaviour', () => {
     const preview = await undoImport(new MoneyloverClient('t'), 'batch1234', { dryRun: true });
     expect(preview.ids).toEqual(['created-9']);
     expect(global.fetch.mock.calls.at(-1)[0]).not.toMatch(/\/transaction\/delete$/);
+  });
+
+  it('leaves the batch marker out when markBatch is false', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).endsWith('/category/list-all')) {
+        return json([{ _id: 'global-food', name: 'Food', type: 2, account: 'w1' }]);
+      }
+      return json({});
+    });
+
+    const summary = await createTransactions(new MoneyloverClient('t'), {
+      walletId: 'w1',
+      dryRun: true,
+      skipDuplicates: false,
+      markBatch: false,
+      batchId: 'batch1234',
+      transactions: [{ date: '2026-04-18', amount: '9', note: 'Cafe', categoryId: 'global-food' }]
+    });
+
+    expect(summary.batchId).toBeNull();
+    expect(summary.warning).toMatch(/undo_import cannot find this batch/);
+    expect(summary.results[0].note).toBe('Cafe');
+    expect(summary.results[0].payload.note).toBe('Cafe');
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
 
   it('explains a category write failure on a user_category_v2 account', async () => {

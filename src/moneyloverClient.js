@@ -27,10 +27,12 @@ import {
 const WRITE_TIMEOUT_MS = 20000;
 const sessionCategories = new Map();
 let sessionGlobalCategories;
+let sessionWallets;
 
 export const clearCategorySession = () => {
   sessionCategories.clear();
   sessionGlobalCategories = undefined;
+  sessionWallets = undefined;
 };
 
 const WRITE_PATHS = new Set(['/transaction/add', '/transaction/edit', '/transaction/delete', '/transaction/add-multi']);
@@ -209,12 +211,19 @@ export class MoneyloverClient {
     this.onSession = typeof onSession === 'function' ? onSession : null;
     this.#walletCategoryCache = new Map();
     this.#globalCategoriesCache = null;
+    this.#walletsCache = undefined;
     this.#userInfo = null;
   }
 
   #walletCategoryCache;
   #globalCategoriesCache;
+  #walletsCache;
   #userInfo;
+
+  #clearWalletList() {
+    this.#walletsCache = undefined;
+    sessionWallets = undefined;
+  }
 
   static lastSession = null;
 
@@ -352,7 +361,17 @@ export class MoneyloverClient {
   }
 
   async getWallets() {
-    return this.#post('/wallet/list');
+    if (this.#walletsCache !== undefined) {
+      return this.#walletsCache;
+    }
+    if (sessionWallets !== undefined) {
+      this.#walletsCache = sessionWallets;
+      return sessionWallets;
+    }
+    const list = unwrapList(await this.#post('/wallet/list'));
+    this.#walletsCache = list;
+    sessionWallets = list;
+    return list;
   }
 
   async getWalletBalance(walletId) {
@@ -381,7 +400,9 @@ export class MoneyloverClient {
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/wallet/add', payload };
     }
-    return this.#postJson('/wallet/add', payload);
+    const created = await this.#postJson('/wallet/add', payload);
+    this.#clearWalletList();
+    return created;
   }
 
   async editWallet(id, params = {}) {
@@ -423,7 +444,9 @@ export class MoneyloverClient {
     if (params.dryRun === true) {
       return { dryRun: true, endpoint: '/wallet/edit', payload };
     }
-    return this.#postJson('/wallet/edit', payload);
+    const updated = await this.#postJson('/wallet/edit', payload);
+    this.#clearWalletList();
+    return updated;
   }
 
   async deleteWallet(id, { dryRun = false } = {}) {
@@ -431,7 +454,9 @@ export class MoneyloverClient {
     if (dryRun) {
       return { dryRun: true, endpoint: '/wallet/delete', payload };
     }
-    return this.#postJson('/wallet/delete', payload);
+    const deleted = await this.#postJson('/wallet/delete', payload);
+    this.#clearWalletList();
+    return deleted;
   }
 
   async getCategories(walletId) {
@@ -1026,7 +1051,9 @@ export class MoneyloverClient {
 
     let fromName = params.fromWalletName ?? '';
     let toName = params.toWalletName ?? '';
-    if (!fromName || !toName) {
+    const outgoingNoteGiven = params.fromNote != null || params.note != null;
+    const incomingNoteGiven = params.toNote != null;
+    if ((!fromName || !toName) && !(outgoingNoteGiven && incomingNoteGiven)) {
       try {
         const wallets = unwrapList(await this.getWallets());
         fromName = fromName || wallets.find((wallet) => wallet?._id === fromWalletId)?.name || '';

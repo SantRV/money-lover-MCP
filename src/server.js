@@ -610,7 +610,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'List Categories',
       description:
-        'Categories the website add form offers for one wallet: POST /category/list-all rows with account equal to this wallet. id and addId are the id to send on /transaction/add. The same add id can appear on other wallets; pair it with this walletId. Loan and Repayment are included when list-all has them; the website shows those on the debt tab. Set includeUnusable to also list stored /category/list rows the picker does not offer, each with a reason. Some wallets have no Other expense category.',
+        'Categories the website add form offers for one wallet: POST /category/list-all rows with account equal to this wallet. id and addId are the picker id to send on /transaction/add. Search and transaction lists show a different stored id for the same category. includeUnusable adds storedId and storedIds on the picker row; those are the ids search returns. Only picker categories can be used for a new transaction. The same add id can appear on other wallets; pair it with this walletId. Loan and Repayment are included when list-all has them; the website shows those on the debt tab. Set includeUnusable to also list stored /category/list rows the picker does not offer, each with a reason. Some wallets have no Other expense category.',
       inputSchema: {
         ...walletIdArgument,
         includeUnusable: z
@@ -762,7 +762,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Transactions',
       description:
-        'Import a batch of transactions (max 200). Each row needs date, amount, note, and category or categoryId. Returns one result per row (created, skipped_duplicate, dry_run, or error) and continues after a row fails. Duplicates are the same wallet, calendar date, absolute amount, and similar note, matched through /transaction/search. Each written note gets an ml-batch marker and the created ids are stored locally so undo_import can remove them. skipDuplicates defaults to true. Use dryRun to preview. Amounts are stored as positive magnitudes; category type selects income or expense.',
+        'Import a batch of transactions (max 200). Each row needs date, amount, note, and category or categoryId. Returns one result per row (created, skipped_duplicate, dry_run, or error) and continues after a row fails. Duplicates are the same wallet, calendar date, absolute amount, and similar note, matched through /transaction/search. Each written note gets an ml-batch marker and the created ids are stored locally so undo_import can remove them, unless markBatch is false. skipDuplicates defaults to true. Use dryRun to preview. Amounts are stored as positive magnitudes; category type selects income or expense.',
       inputSchema: {
         ...walletIdArgument,
         transactions: z
@@ -799,10 +799,16 @@ const registerMoneyloverTools = (server) => {
           .optional()
           .describe(
             'Id stored as an ml-batch marker in each note and in the local import log. A new id is used when omitted.'
+          ),
+        markBatch: z
+          .boolean()
+          .optional()
+          .describe(
+            'When false, notes are saved without the ml-batch marker and the local import log is not written. undo_import cannot find the batch. Default true.'
           )
       }
     },
-    guard(async ({ walletId, transactions, skipDuplicates, dryRun, amountMode, batchId }) =>
+    guard(async ({ walletId, transactions, skipDuplicates, dryRun, amountMode, batchId, markBatch }) =>
       runWithClient(undefined, (client) =>
         createTransactions(client, {
           walletId,
@@ -810,8 +816,8 @@ const registerMoneyloverTools = (server) => {
           skipDuplicates,
           dryRun,
           amountMode,
-          markBatch: true,
-          batchId
+          markBatch: markBatch !== false,
+          batchId: markBatch === false ? undefined : batchId
         })
       )
     )
@@ -822,7 +828,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Import Transactions CSV',
       description:
-        'Parse a bank CSV and import it. Accepts a header row plus Date, Amount and/or Debit and Credit, and Description/Narrative/Payee. Australian dates (DD/MM/YYYY) are the default when the order is ambiguous. Debits and negative amounts are expenses; credits and positive amounts are income. Pass expenseCategory and incomeCategory (name or id), a defaultCategory, or a category column. Without a category the tool returns the parsed rows and does not write. skipDuplicates defaults to true. dryRun previews the Money Lover payload. Never put the CSV in git.',
+        'Parse a bank CSV and import it. Accepts a header row plus Date, Amount and/or Debit and Credit, and Description/Narrative/Payee. Australian dates (DD/MM/YYYY) are the default when the order is ambiguous. Debits and negative amounts are expenses; credits and positive amounts are income. Pass expenseCategory and incomeCategory (name or id), a defaultCategory, or a category column. Without a category the tool returns the parsed rows and does not write. skipDuplicates defaults to true. dryRun previews the Money Lover payload. Written notes include an ml-batch marker unless markBatch is false. Never put the CSV in git.',
       inputSchema: {
         ...walletIdArgument,
         csv: z.string().min(1).describe('Full CSV text, including the header row'),
@@ -848,7 +854,13 @@ const registerMoneyloverTools = (server) => {
           .describe('Header names when the file does not use common bank columns'),
         skipDuplicates: z.boolean().optional().describe('Skip duplicate rows. Default true.'),
         dryRun: dryRunArgument,
-        amountMode: z.enum(['magnitude', 'signed']).optional()
+        amountMode: z.enum(['magnitude', 'signed']).optional(),
+        markBatch: z
+          .boolean()
+          .optional()
+          .describe(
+            'When false, notes are saved without the ml-batch marker and the local import log is not written. undo_import cannot find the batch. Default true.'
+          )
       }
     },
     guard(
@@ -862,7 +874,8 @@ const registerMoneyloverTools = (server) => {
         mapping,
         skipDuplicates,
         dryRun,
-        amountMode
+        amountMode,
+        markBatch
       }) => {
         const parsed = rowsFromBankCsv(csv, {
           expenseCategory,
@@ -907,7 +920,7 @@ const registerMoneyloverTools = (server) => {
             skipDuplicates,
             dryRun,
             amountMode: mode,
-            markBatch: true
+            markBatch: markBatch !== false
           })
         );
         return {
@@ -1496,7 +1509,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Transfer Money',
       description:
-        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Outgoing transfer, Incoming transfer, and Other expense are used only when that metadata is in the add picker for that wallet (list_categories). A stored catalogue row that the picker does not offer is refused with CATEGORY_NOT_USABLE. If the picker has no matching category, pass fromCategoryId, toCategoryId, or feeCategoryId from list_categories. dryRun previews the legs.',
+        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Outgoing transfer, Incoming transfer, and Other expense are used only when that metadata is in the add picker for that wallet (list_categories). A stored catalogue row that the picker does not offer is refused with CATEGORY_NOT_USABLE. If the picker has no matching category, pass fromCategoryId, toCategoryId, or feeCategoryId from list_categories. Default notes use wallet names from /wallet/list, loaded once per process. Pass fromNote and toNote to skip that lookup. dryRun previews the legs.',
       inputSchema: {
         fromWalletId: z.string().min(1),
         toWalletId: z.string().min(1),
@@ -1504,8 +1517,14 @@ const registerMoneyloverTools = (server) => {
         toAmount: amountArgument.optional().describe('Amount arriving in the destination wallet. Defaults to amount.'),
         date: dateArgument,
         note: z.string().optional().describe('Note on the outgoing leg when fromNote is omitted.'),
-        fromNote: z.string().optional(),
-        toNote: z.string().optional(),
+        fromNote: z
+          .string()
+          .optional()
+          .describe('Note on the outgoing leg. Together with toNote, skips the wallet-name lookup.'),
+        toNote: z
+          .string()
+          .optional()
+          .describe('Note on the incoming leg. Together with fromNote or note, skips the wallet-name lookup.'),
         feeAmount: amountArgument.optional().describe('Optional fee, posted as its own expense leg.'),
         feeWalletId: z
           .string()
