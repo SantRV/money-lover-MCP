@@ -55,7 +55,6 @@ describe('createTransactions', () => {
     global.fetch
       .mockResolvedValueOnce(json({ transactions: [] }))
       .mockResolvedValueOnce(json(walletCategories))
-      .mockResolvedValueOnce(json(globalCategories))
       .mockResolvedValueOnce(json({ _id: 'created-1' }));
 
     const summary = await createTransactions(new MoneyloverClient('token', { timeZone: 'Australia/Adelaide' }), {
@@ -71,7 +70,7 @@ describe('createTransactions', () => {
     expect(summary.results[0].id).toBe('created-1');
     const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
     expect(JSON.parse(post[1].body).displayDate).toBe('2026-04-18');
-    expect(JSON.parse(post[1].body).amount).toBe('12.50');
+    expect(JSON.parse(post[1].body).amount).toBe(12.5);
   });
 
   it('previews a batch without posting', async () => {
@@ -88,7 +87,7 @@ describe('createTransactions', () => {
     expect(summary.results[0].payload).toMatchObject({
       account: 'w1',
       category: 'global-food',
-      amount: '9',
+      amount: 9,
       displayDate: '2026-04-18'
     });
     expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);

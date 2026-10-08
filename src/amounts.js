@@ -81,6 +81,18 @@ export const formatAmount = (value) => {
 };
 
 /**
+ * JSON number for /transaction/add. The web app's InputMoney emits
+ * numeralFormatter().numberConvert, which is parseFloat, not a string.
+ */
+export const wireAmount = (formatted) => {
+  const value = typeof formatted === 'number' ? formatted : Number(formatted);
+  if (!Number.isFinite(value)) {
+    throw new Error('amount is not a finite number');
+  }
+  return value;
+};
+
+/**
  * @param {unknown} raw
  * @param {number | null | undefined} categoryType 1 income, 2 expense
  * @param {{ amountMode?: 'magnitude' | 'signed' }} [options]

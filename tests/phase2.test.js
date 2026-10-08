@@ -2,10 +2,11 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MoneyloverClient, MoneyloverApiError } from '../src/moneyloverClient.js';
+import { MoneyloverClient, MoneyloverApiError, timeoutForRequest } from '../src/moneyloverClient.js';
 import { isAuthError, isDeviceError } from '../src/authError.js';
-import { buildSearchFilter } from '../src/searchFilters.js';
-import { readBalance, signedTransactionDelta } from '../src/balance.js';
+import { buildSearchFilter, pageSearchResult } from '../src/searchFilters.js';
+import { readBalance, signedTransactionDelta, summarizeTransactionTotals } from '../src/balance.js';
+import { __test as serverTest } from '../src/server.js';
 import { createTransactions } from '../src/transactions.js';
 import { readImportLog, stripBatchMarker, withBatchMarker } from '../src/importLog.js';
 import { undoImport } from '../src/importUndo.js';
@@ -180,7 +181,7 @@ describe('phase 2 API behaviour', () => {
     expect(JSON.parse(post[1].body)).toMatchObject({
       account: 'w1',
       category: 'other-local',
-      amount: '30',
+      amount: 30,
       displayDate: '2026-04-18',
       note: 'Balance adjustment'
     });
@@ -298,5 +299,79 @@ describe('phase 2 API behaviour', () => {
       isRepeat: true
     });
     expect(global.fetch.mock.calls[1][0]).toBe('https://web.moneylover.me/api/report/w1');
+  });
+
+  it('adds up search balance rows and does not return tokenDevice', async () => {
+    const rows = [
+      { amount: 10, category: { type: 1 }, tokenDevice: 'web' },
+      { amount: 4, category: { type: 2 }, tokenDevice: 'web' },
+      { amount: 1, tokenDevice: 'secret' }
+    ];
+    expect(summarizeTransactionTotals(rows)).toEqual({
+      count: 3,
+      income: 10,
+      expense: 4,
+      net: 6,
+      skipped: 1,
+      incomplete: true
+    });
+    expect(JSON.stringify(summarizeTransactionTotals(rows))).not.toMatch(/tokenDevice|secret/);
+
+    global.fetch = vi.fn().mockResolvedValueOnce(json(rows));
+    const totals = await new MoneyloverClient('t').searchTransactionTotals({ accounts: ['w1'] });
+    expect(totals.count).toBe(3);
+    expect(totals.net).toBe(6);
+    expect(JSON.stringify(totals)).not.toMatch(/tokenDevice/);
+  });
+
+  it('treats a full search page as incomplete when the API sends no total', () => {
+    const full = pageSearchResult({ transactions: Array.from({ length: 50 }, (_, index) => index), offset: 100 });
+    expect(full.truncated).toBe(true);
+    expect(full.total).toBeUndefined();
+    expect(full.nextOffset).toBe(150);
+
+    const last = pageSearchResult({ transactions: Array.from({ length: 7 }, (_, index) => index), offset: 150 });
+    expect(last.truncated).toBe(false);
+    expect(last.nextOffset).toBeNull();
+  });
+
+  it('fails HTTP 524 once, with the explanation in the error text', async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]))
+      .mockResolvedValueOnce(new Response('error code: 524', { status: 524 }));
+
+    const error = await new MoneyloverClient('t', { requestTimeout: 150000 })
+      .addTransaction({
+        walletId: 'w1',
+        categoryId: 'cat',
+        amount: '0.01',
+        date: '2026-10-08'
+      })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: 'CLOUDFLARE' });
+    expect(error.message).toMatch(/524/);
+    expect(error.message).toMatch(/does not retry/);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/transaction/add'))).toHaveLength(1);
+    const formatted = serverTest.formatError(error);
+    expect(formatted.content[0].text).toMatch(/HTTP 524/);
+    expect(formatted.content[0].text).toMatch(/does not retry/);
+    expect(formatted.structuredContent.code).toBe('CLOUDFLARE');
+    expect(timeoutForRequest('/transaction/add', { requestTimeout: 150000 })).toBe(20000);
+    expect(timeoutForRequest('/wallet/list', { requestTimeout: 150000 })).toBe(150000);
+  });
+
+  it('reuses categories for the same wallet across clients', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).endsWith('/category/list')) {
+        return json([{ _id: 'cat', account: 'w1', name: 'Food', type: 2 }]);
+      }
+      return json({ _id: 'new' });
+    });
+    const params = { walletId: 'w1', categoryId: 'cat', amount: '1', date: '2026-10-08', dryRun: true };
+    await new MoneyloverClient('t').addTransaction(params);
+    await new MoneyloverClient('t').addTransaction(params);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list'))).toHaveLength(1);
   });
 });

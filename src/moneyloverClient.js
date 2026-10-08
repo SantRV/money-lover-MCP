@@ -1,4 +1,4 @@
-import { prepareAmount, amountCents, formatAmount, parseAmount } from './amounts.js';
+import { prepareAmount, amountCents, formatAmount, parseAmount, wireAmount } from './amounts.js';
 import {
   CategoryType,
   coerceCategoryType,
@@ -10,14 +10,34 @@ import {
 import { addCalendarDays, calendarDate, safeCalendarDate } from './dates.js';
 import { clip, redact } from './redact.js';
 import { apiErrorCode, deviceErrorMessage, isAuthError, isDeviceError, NOT_AUTHORIZED_CODE } from './authError.js';
-import { readBalance, roundMoney, signedTransactionDelta } from './balance.js';
+import { readBalance, roundMoney, signedTransactionDelta, summarizeTransactionTotals } from './balance.js';
 import {
   cloudflareWriteMessage,
   looksLikeCloudflare,
   looksLikeReadOnly,
   readOnlyWriteMessage,
-  userCategoryV2Message
+  userCategoryV2Message,
+  writeTimeoutMessage
 } from './writeErrors.js';
+
+const WRITE_TIMEOUT_MS = 20000;
+const sessionCategories = new Map();
+let sessionGlobalCategories;
+
+export const clearCategorySession = () => {
+  sessionCategories.clear();
+  sessionGlobalCategories = undefined;
+};
+
+const WRITE_PATHS = new Set(['/transaction/add', '/transaction/edit', '/transaction/delete', '/transaction/add-multi']);
+
+export const timeoutForRequest = (path, { requestTimeout = 30000, writeTimeout = WRITE_TIMEOUT_MS } = {}) => {
+  const base = String(path ?? '').split('?')[0];
+  if (WRITE_PATHS.has(base)) {
+    return Math.min(requestTimeout, writeTimeout);
+  }
+  return requestTimeout;
+};
 
 const BASE_URL = 'https://web.moneylover.me/api';
 const LOGIN_URL = `${BASE_URL}/user/login-url`;
@@ -88,13 +108,6 @@ const resolutionWarning = (source) => {
   return null;
 };
 
-const textIfSet = (value) => {
-  if (value == null || value === '') {
-    return null;
-  }
-  return String(value);
-};
-
 const photoReference = (image) => {
   if (typeof image !== 'string') {
     throw new Error(
@@ -102,6 +115,65 @@ const photoReference = (image) => {
     );
   }
   return image;
+};
+
+const finiteOr = (value, fallback) => {
+  if (value == null || value === '') {
+    return fallback;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error('location coordinates must be numbers');
+  }
+  return number;
+};
+
+/**
+ * Body for POST /transaction/add, matching the archived web bundle
+ * (saveTransaction → transInfo → Ki.postData).
+ * Headers on that call are Accept, dataformat, Content-Type application/json,
+ * and authorization AuthJWT. It does not send client, device, or version headers
+ * (those are only on the Revo API and image upload). Amount is a JSON number.
+ * displayDate is YYYY-MM-DD. The empty location, event, image, and exclude_report
+ * fields are always present; remind is not sent on add.
+ */
+export const transactionAddBody = ({
+  account,
+  category,
+  amount,
+  note = '',
+  displayDate,
+  with: parties = [],
+  event = '',
+  excludeReport = false,
+  longtitude,
+  latitude,
+  addressName = '',
+  addressDetails = '',
+  addressIcon = '',
+  image = '',
+  remind
+}) => {
+  const body = {
+    with: Array.isArray(parties) ? parties.map((value) => String(value)) : [],
+    account,
+    category,
+    amount: wireAmount(amount),
+    note: note == null ? '' : String(note),
+    displayDate,
+    event: event == null ? '' : String(event),
+    exclude_report: Boolean(excludeReport),
+    longtitude: finiteOr(longtitude, 0),
+    latitude: finiteOr(latitude, 0),
+    addressName: addressName == null ? '' : String(addressName),
+    addressDetails: addressDetails == null ? '' : String(addressDetails),
+    addressIcon: addressIcon == null ? '' : String(addressIcon),
+    image: image == null ? '' : String(image)
+  };
+  if (remind != null) {
+    body.remind = remind;
+  }
+  return body;
 };
 
 export class MoneyloverClient {
@@ -436,26 +508,44 @@ export class MoneyloverClient {
   }
 
   async #walletCategories(walletId) {
-    if (!this.#walletCategoryCache.has(walletId)) {
-      this.#walletCategoryCache.set(walletId, unwrapList(await this.getCategories(walletId)));
+    if (this.#walletCategoryCache.has(walletId)) {
+      return this.#walletCategoryCache.get(walletId);
     }
-    return this.#walletCategoryCache.get(walletId);
+    if (sessionCategories.has(walletId)) {
+      const cached = sessionCategories.get(walletId);
+      this.#walletCategoryCache.set(walletId, cached);
+      return cached;
+    }
+    const list = unwrapList(await this.getCategories(walletId));
+    this.#walletCategoryCache.set(walletId, list);
+    sessionCategories.set(walletId, list);
+    return list;
   }
 
   async #globalCategories() {
     if (this.#globalCategoriesCache) {
       return this.#globalCategoriesCache;
     }
+    if (sessionGlobalCategories) {
+      this.#globalCategoriesCache = sessionGlobalCategories;
+      return sessionGlobalCategories;
+    }
     try {
       this.#globalCategoriesCache = unwrapList(await this.getAllCategories());
     } catch {
       this.#globalCategoriesCache = [];
     }
+    sessionGlobalCategories = this.#globalCategoriesCache;
     return this.#globalCategoriesCache;
   }
 
   async #resolveCategory(walletId, { categoryId, categoryName, direction }) {
     const walletList = await this.#walletCategories(walletId);
+    const id = typeof categoryId === 'string' ? categoryId.trim() : '';
+    const onThisWallet = id && walletList.some((category) => category._id === id);
+    if (!id || onThisWallet) {
+      return selectCategory(walletList, [], walletId, { categoryId, categoryName, direction });
+    }
     const globalList = await this.#globalCategories();
     return selectCategory(walletList, globalList, walletId, { categoryId, categoryName, direction });
   }
@@ -501,54 +591,33 @@ export class MoneyloverClient {
       );
     }
 
-    const payload = {
+    if (params.image != null) {
+      photoReference(params.image);
+    }
+    const remind = params.remind != null ? params.remind : params.reminder;
+    const payload = transactionAddBody({
       with: withParties,
       account: walletId,
       category: resolved.id,
       amount: amount.amount,
       note,
-      displayDate: date
-    };
-    if (params.excludeReport != null) {
-      payload.exclude_report = Boolean(params.excludeReport);
-    }
-    const eventId = textIfSet(params.eventId ?? (typeof params.event === 'string' ? params.event : null));
-    if (eventId) {
-      payload.event = eventId;
-    }
-    if (params.remind != null) {
-      payload.remind = params.remind;
-    } else if (params.reminder != null) {
-      payload.remind = params.reminder;
-    }
-    const longtitude = textIfSet(params.longtitude ?? params.longitude);
-    const latitude = textIfSet(params.latitude);
-    const addressName = textIfSet(params.addressName);
-    const addressDetails = textIfSet(params.addressDetails);
-    const addressIcon = textIfSet(params.addressIcon);
-    if (longtitude) {
-      payload.longtitude = longtitude;
-    }
-    if (latitude) {
-      payload.latitude = latitude;
-    }
-    if (addressName) {
-      payload.addressName = addressName;
-    }
-    if (addressDetails) {
-      payload.addressDetails = addressDetails;
-    }
-    if (addressIcon) {
-      payload.addressIcon = addressIcon;
-    }
-    if (params.image != null) {
-      payload.image = photoReference(params.image);
-    }
+      displayDate: date,
+      event: params.eventId ?? (typeof params.event === 'string' ? params.event : ''),
+      excludeReport: params.excludeReport,
+      longtitude: params.longtitude ?? params.longitude,
+      latitude: params.latitude,
+      addressName: params.addressName,
+      addressDetails: params.addressDetails,
+      addressIcon: params.addressIcon,
+      image: params.image,
+      remind
+    });
 
     return {
       payload,
       date,
       cents: amountCents(amount.amount),
+      amountText: amount.amount,
       note,
       categoryId: resolved.id,
       categoryType: resolved.category?.type ?? null,
@@ -621,12 +690,12 @@ export class MoneyloverClient {
       throw new Error('categoryId is required when the existing transaction has no category');
     }
 
-    let amount = formatAmount(Math.abs(parseAmount(existing.amount)));
+    let amount = wireAmount(formatAmount(Math.abs(parseAmount(existing.amount))));
     if (params.amount != null) {
       const prepared = prepareAmount(params.amount, existing.category?.type, {
         amountMode: params.amountMode === 'signed' ? 'signed' : 'magnitude'
       });
-      amount = prepared.amount;
+      amount = wireAmount(prepared.amount);
       warnings.push(...prepared.warnings);
     }
 
@@ -700,7 +769,8 @@ export class MoneyloverClient {
   }
 
   async searchTransactionTotals(filters = {}) {
-    return this.#postJson('/transaction/search/balance', filters);
+    const raw = await this.#postJson('/transaction/search/balance', filters);
+    return summarizeTransactionTotals(raw);
   }
 
   async searchAllTransactions(filters = {}, { pageSize = 100, maxPages = 20 } = {}) {
@@ -1104,13 +1174,16 @@ export class MoneyloverClient {
     if (!transaction || typeof transaction !== 'object') {
       return transaction;
     }
-    const category = transaction.category && typeof transaction.category === 'object' ? transaction.category : null;
-    const displayDate = safeCalendarDate(transaction.displayDate, { timeZone: this.timeZone });
+    const rest = { ...transaction };
+    delete rest.tokenDevice;
+    delete rest.token_device;
+    const category = rest.category && typeof rest.category === 'object' ? rest.category : null;
+    const displayDate = safeCalendarDate(rest.displayDate, { timeZone: this.timeZone });
     return {
-      ...transaction,
-      displayDate: displayDate ?? transaction.displayDate,
-      displayDateRaw: transaction.displayDate,
-      categoryId: category?._id ?? (typeof transaction.category === 'string' ? transaction.category : null),
+      ...rest,
+      displayDate: displayDate ?? rest.displayDate,
+      displayDateRaw: rest.displayDate,
+      categoryId: category?._id ?? (typeof rest.category === 'string' ? rest.category : null),
       categoryName: category?.name ?? null,
       categoryType: category?.type ?? null,
       categoryTypeName: category ? summarizeCategory(category).typeName : null
@@ -1119,20 +1192,22 @@ export class MoneyloverClient {
 
   #authHeaders() {
     return {
+      Accept: 'application/json',
+      dataformat: 'json',
       Authorization: `AuthJWT ${this.token}`,
       'Cache-Control': 'no-cache, max-age=0, no-store, no-transform, must-revalidate'
     };
   }
 
-  #withTimeout() {
+  #withTimeout(timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => {
       controller.abort();
-    }, this.requestTimeout);
+    }, timeoutMs);
     return { signal: controller.signal, clear: () => clearTimeout(timer) };
   }
 
-  async #request(path, { method, body, headers, authRetried = false }) {
+  async #request(path, { method, body, headers, authRetried = false } = {}) {
     const requestHeaders = new Headers(this.#authHeaders());
     if (headers) {
       for (const [key, value] of Object.entries(headers)) {
@@ -1140,7 +1215,9 @@ export class MoneyloverClient {
       }
     }
 
-    const { signal, clear } = this.#withTimeout();
+    const timeoutMs = timeoutForRequest(path, { requestTimeout: this.requestTimeout });
+    const write = WRITE_PATHS.has(String(path).split('?')[0]);
+    const { signal, clear } = this.#withTimeout(timeoutMs);
     let response;
     try {
       response = await fetch(`${BASE_URL}${path}`, {
@@ -1153,7 +1230,9 @@ export class MoneyloverClient {
       clear();
       if (signal.aborted) {
         throw new MoneyloverApiError(
-          `Request to ${path} timed out — the Money Lover server did not respond within ${this.requestTimeout}ms`,
+          write
+            ? writeTimeoutMessage(path, timeoutMs)
+            : `Request to ${path} timed out — the Money Lover server did not respond within ${timeoutMs}ms`,
           { code: 'TIMEOUT' }
         );
       }
@@ -1164,7 +1243,7 @@ export class MoneyloverClient {
     if (!response.ok) {
       const detail = clip(await response.text());
       if (looksLikeCloudflare(response.status, detail)) {
-        throw new MoneyloverApiError(cloudflareWriteMessage(), { code: 'CLOUDFLARE', detail });
+        throw new MoneyloverApiError(cloudflareWriteMessage(response.status), { code: 'CLOUDFLARE', detail });
       }
       if (response.status === 401 && !authRetried && this.refreshToken) {
         await this.refreshAccessToken();

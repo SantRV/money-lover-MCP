@@ -1,5 +1,8 @@
 import { calendarDate } from './dates.js';
 
+/** /transaction/search ignores limit and returns this many rows per offset. */
+export const SEARCH_PAGE_SIZE = 50;
+
 const stringList = (value, name) => {
   if (value == null) {
     return undefined;
@@ -63,4 +66,22 @@ export const buildSearchFilter = (input = {}, { timeZone } = {}) => {
     filter.offset = input.offset;
   }
   return filter;
+};
+
+/**
+ * /transaction/search ignores limit and returns SEARCH_PAGE_SIZE rows.
+ * A full page is not the end of the list, even when the API sends no total.
+ */
+export const pageSearchResult = ({ transactions, offset = 0, reportedTotal = null, pageSize = SEARCH_PAGE_SIZE }) => {
+  const returned = Array.isArray(transactions) ? transactions.length : 0;
+  const pageFull = returned >= pageSize;
+  const truncated = reportedTotal != null ? offset + returned < reportedTotal : pageFull;
+  return {
+    returned,
+    truncated,
+    offset,
+    nextOffset: truncated ? offset + returned : null,
+    pageSize,
+    ...(reportedTotal != null ? { total: reportedTotal } : {})
+  };
 };

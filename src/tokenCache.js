@@ -22,13 +22,47 @@ const readCacheFile = async (email) => {
   }
   try {
     const raw = await fs.readFile(getTokenPath(email), 'utf8');
-    const data = JSON.parse(raw);
-    return data && typeof data === 'object' ? data : null;
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      const data = JSON.parse(trimmed);
+      if (data && typeof data === 'object') {
+        return data;
+      }
+    } catch {
+      return { token: trimmed };
+    }
+    return null;
   } catch (error) {
     if (error.code === 'ENOENT') {
       return null;
     }
     throw error;
+  }
+};
+
+/**
+ * A cached access token is reusable until its JWT exp, when it has one.
+ * Opaque tokens are treated as valid until the API rejects them.
+ */
+export const accessTokenStillValid = (token, now = Date.now()) => {
+  if (typeof token !== 'string' || !token) {
+    return false;
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return true;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (typeof payload.exp !== 'number') {
+      return true;
+    }
+    return payload.exp * 1000 > now + 60_000;
+  } catch {
+    return true;
   }
 };
 

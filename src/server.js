@@ -17,13 +17,24 @@ const readRefreshToken = (() => {
     return async () => null;
   }
 })();
+
+const accessTokenStillValid = (token) => {
+  try {
+    if (typeof tokenCache.accessTokenStillValid === 'function') {
+      return tokenCache.accessTokenStillValid(token);
+    }
+  } catch {
+    return true;
+  }
+  return true;
+};
 import { clip, redact } from './redact.js';
 import { pageItems } from './paging.js';
 import { summarizeCategory, unwrapList } from './categories.js';
 import { rowsFromBankCsv } from './csv.js';
 import { createTransactions } from './transactions.js';
 import { assertConfirm } from './safety.js';
-import { buildSearchFilter } from './searchFilters.js';
+import { buildSearchFilter, pageSearchResult, SEARCH_PAGE_SIZE } from './searchFilters.js';
 import { undoImport } from './importUndo.js';
 import { assertBatchId } from './importLog.js';
 
@@ -141,14 +152,83 @@ let envTokenPromise = null;
 let cacheLoaded = false;
 let cachedEnvUsesDirectToken = false;
 
+const MAX_TOOL_RESPONSE_CHARS = 400_000;
+
+const stripSensitiveFields = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripSensitiveFields(item));
+  }
+  if (value && typeof value === 'object') {
+    const output = {};
+    for (const [key, nested] of Object.entries(value)) {
+      if (key === 'tokenDevice' || key === 'token_device') {
+        continue;
+      }
+      output[key] = stripSensitiveFields(nested);
+    }
+    return output;
+  }
+  return value;
+};
+
+const shrinkToolResult = (value) => {
+  if (Array.isArray(value)) {
+    return value.slice(0, Math.max(1, Math.floor(value.length / 2)));
+  }
+  if (!value || typeof value !== 'object') {
+    return {
+      truncated: true,
+      message: 'This result was too large for the MCP connection and was not returned. Narrow the query.'
+    };
+  }
+  const next = { ...value, truncated: true };
+  let shortened = false;
+  for (const key of ['transactions', 'categories', 'wallets', 'results', 'rows', 'config', 'currencies']) {
+    if (Array.isArray(next[key]) && next[key].length > 1) {
+      const half = Math.max(1, Math.floor(next[key].length / 2));
+      next[key] = next[key].slice(0, half);
+      next.returned = half;
+      if (typeof next.offset === 'number') {
+        next.nextOffset = next.offset + half;
+      }
+      shortened = true;
+    }
+  }
+  next.message = shortened
+    ? 'The result was shortened so it fits the MCP connection. Call again with nextOffset to continue.'
+    : 'This result was too large for the MCP connection and was not returned. Narrow the query.';
+  if (!shortened) {
+    for (const key of Object.keys(next)) {
+      if (key !== 'truncated' && key !== 'message' && key !== 'offset' && key !== 'nextOffset') {
+        delete next[key];
+      }
+    }
+  }
+  return next;
+};
+
 const formatSuccess = (data) => {
-  const safe = redact(data ?? {});
-  const structured = safe && typeof safe === 'object' ? safe : { result: safe };
+  let structured = stripSensitiveFields(redact(data ?? {}));
+  if (!structured || typeof structured !== 'object') {
+    structured = { result: structured };
+  }
+  let text = JSON.stringify(structured, null, 2);
+  for (let attempt = 0; text.length > MAX_TOOL_RESPONSE_CHARS && attempt < 12; attempt += 1) {
+    structured = shrinkToolResult(structured);
+    text = JSON.stringify(structured, null, 2);
+  }
+  if (text.length > MAX_TOOL_RESPONSE_CHARS) {
+    structured = {
+      truncated: true,
+      message: 'This result was too large for the MCP connection and was not returned. Narrow the query.'
+    };
+    text = JSON.stringify(structured, null, 2);
+  }
   return {
     content: [
       {
         type: 'text',
-        text: JSON.stringify(structured, null, 2)
+        text
       }
     ],
     structuredContent: structured
@@ -156,7 +236,7 @@ const formatSuccess = (data) => {
 };
 
 const formatError = (error) => {
-  const message = clip(error?.message || 'Unknown error', 1000);
+  const message = clip(error?.message || 'Unknown error', 1500);
   const base = {
     error: error?.name || 'Error',
     message
@@ -167,8 +247,9 @@ const formatError = (error) => {
   if (error?.detail != null) {
     base.detail = redact(error.detail);
   }
+  const text = base.code != null && !message.includes(String(base.code)) ? `${message} (${base.code})` : message;
   return {
-    content: [{ type: 'text', text: message }],
+    content: [{ type: 'text', text }],
     structuredContent: base,
     isError: true
   };
@@ -271,6 +352,28 @@ const fetchEnvToken = async (forceRefresh = false) => {
       warn('Failed to read cached Money Lover token', error);
     }
     cacheLoaded = true;
+  }
+
+  if (cachedEnvToken && !accessTokenStillValid(cachedEnvToken)) {
+    if (cachedRefreshToken) {
+      try {
+        const client = new MoneyloverClient(cachedEnvToken, {
+          ...clientOptions(),
+          refreshToken: cachedRefreshToken,
+          onSession: async (next) => {
+            cachedEnvToken = next.token;
+            cachedRefreshToken = next.refreshToken ?? '';
+            await writeToken(cachedEnvEmail, next.token, { refreshToken: next.refreshToken ?? null });
+          }
+        });
+        return await client.refreshAccessToken();
+      } catch (error) {
+        warn('Cached Money Lover access token expired and refresh failed', error);
+        cachedEnvToken = '';
+      }
+    } else {
+      cachedEnvToken = '';
+    }
   }
 
   if (cachedEnvToken) {
@@ -913,7 +1016,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Search Transactions',
       description:
-        'Search transactions with the web app filter: accounts (wallet ids), categoryIDs, startDate, endDate, note, with, and amount {from, to}. limit and offset are sent to /transaction/search (the web app uses pages of 50). displayDate is normalized to YYYY-MM-DD. Duplicate checks for imports use this same filter.',
+        'Search transactions with the web app filter: accounts (wallet ids), categoryIDs, startDate, endDate, note, with, and amount {from, to}. Money Lover ignores limit and always returns 50 rows; offset works. When a full page of 50 comes back, nextOffset is offset + returned and the page is not treated as the end of the list. displayDate is normalized to YYYY-MM-DD. tokenDevice is not returned. Duplicate checks for imports use this same filter.',
       inputSchema: {
         accounts: z.array(z.string().min(1)).optional().describe('Wallet ids. Alias: walletId.'),
         walletId: z.string().min(1).optional().describe('Single wallet id, sent as accounts: [walletId].'),
@@ -925,26 +1028,32 @@ const registerMoneyloverTools = (server) => {
         with: z.array(z.string()).optional().describe('Related parties.'),
         amountFrom: z.number().optional().describe('Minimum amount, sent as amount.from.'),
         amountTo: z.number().optional().describe('Maximum amount, sent as amount.to.'),
-        limit: z.number().int().min(1).max(200).optional().describe('Page size sent to the API. Default 50.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe('Ignored. Money Lover always returns 50 rows. Use offset and nextOffset.'),
         offset: z.number().int().min(0).optional().describe('Offset sent to the API. Default 0.')
       }
     },
-    guard(async ({ limit = 50, offset = 0, ...filters }) =>
+    guard(async ({ offset = 0, ...filters }) =>
       runWithClient(undefined, async (client) => {
-        const query = buildSearchFilter({ ...filters, limit, offset }, { timeZone: process.env.MONEYLOVER_TIMEZONE });
+        const query = buildSearchFilter(
+          { ...filters, limit: SEARCH_PAGE_SIZE, offset },
+          { timeZone: process.env.MONEYLOVER_TIMEZONE }
+        );
         const raw = await client.searchTransactions(query);
         const presented = presentTransactions(client, raw);
-        const returned = presented.transactions.length;
-        const total = presented.reportedTotal;
-        const truncated = total != null ? offset + returned < total : returned === limit;
         return {
           transactions: presented.transactions,
           filter: query,
-          total,
-          returned,
-          truncated,
-          offset,
-          nextOffset: truncated ? offset + returned : null
+          ...pageSearchResult({
+            transactions: presented.transactions,
+            offset,
+            reportedTotal: presented.reportedTotal
+          })
         };
       })
     )
@@ -955,7 +1064,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Search Transaction Totals',
       description:
-        'Totals for the same filter as search_transactions, via /transaction/search/balance. The archived web app posts the filter object and reads data on get_transaction_success. The exact total fields depend on the account and were not checked live.',
+        'Income, expense, net, and count for the same filter as search_transactions. /transaction/search/balance returns every matching transaction, which can be thousands of rows. This tool adds them up on the server and does not return those rows or their tokenDevice values.',
       inputSchema: {
         accounts: z.array(z.string().min(1)).optional(),
         walletId: z.string().min(1).optional(),
@@ -973,7 +1082,7 @@ const registerMoneyloverTools = (server) => {
       runWithClient(undefined, async (client) => {
         const query = buildSearchFilter(filters, { timeZone: process.env.MONEYLOVER_TIMEZONE });
         const totals = await client.searchTransactionTotals(query);
-        return { filter: query, totals };
+        return { filter: query, ...totals };
       })
     )
   );

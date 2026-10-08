@@ -32,6 +32,10 @@ describe('Money Lover MCP server env token resolution', () => {
     delete process.env.MONEYLOVER_MCP_ENV_FILE;
     delete process.env.MONEYLOVER_TOKEN;
     delete process.env.MONEY_LOVER_TOKEN;
+    delete process.env.MONEYLOVER_EMAIL;
+    delete process.env.MONEYLOVER_PASSWORD;
+    delete process.env.EMAIL;
+    delete process.env.PASSWORD;
   });
 
   afterEach(() => {
@@ -300,6 +304,59 @@ describe('Money Lover MCP server env token resolution', () => {
     expect(MockClient.getToken).not.toHaveBeenCalled();
     expect(writeToken).not.toHaveBeenCalled();
     expect(constructedTokens).toEqual(['cached-token']);
+  });
+
+  it('refreshes an expired cached access token instead of logging in', async () => {
+    process.env.EMAIL = 'user@example.com';
+    process.env.PASSWORD = 'secret';
+    const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url');
+    const expired = `${header}.${payload}.sig`;
+    const getToken = vi.fn();
+    const writeToken = vi.fn().mockResolvedValue();
+
+    class MockClient {
+      constructor(token, options = {}) {
+        this.token = token;
+        this.refreshToken = options.refreshToken;
+        this.onSession = options.onSession;
+      }
+
+      async refreshAccessToken() {
+        this.token = 'refreshed-access';
+        if (this.onSession) {
+          await this.onSession({ token: this.token, refreshToken: this.refreshToken });
+        }
+        return this.token;
+      }
+
+      getUserInfo() {
+        return { via: this.token };
+      }
+
+      static getToken = getToken;
+    }
+
+    vi.doMock('../src/moneyloverClient.js', () => ({
+      MoneyloverClient: MockClient,
+      MoneyloverApiError: class extends Error {}
+    }));
+    vi.doMock('../src/tokenCache.js', () => ({
+      readToken: vi.fn().mockResolvedValue(expired),
+      readRefreshToken: vi.fn().mockResolvedValue('refresh-1'),
+      accessTokenStillValid: vi.fn().mockReturnValue(false),
+      writeToken,
+      removeToken: vi.fn().mockResolvedValue()
+    }));
+
+    const { __test } = await import('../src/server.js');
+    __test.clearEnvTokenCache();
+
+    const result = await __test.runWithClient(undefined, (client) => client.getUserInfo());
+
+    expect(result).toEqual({ via: 'refreshed-access' });
+    expect(getToken).not.toHaveBeenCalled();
+    expect(writeToken).toHaveBeenCalled();
   });
 
   it('refreshes env token when API returns an authentication error', async () => {

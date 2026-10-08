@@ -1,5 +1,5 @@
 import { parseAmount } from './amounts.js';
-import { CategoryType } from './categories.js';
+import { CategoryType, unwrapList } from './categories.js';
 
 const numeric = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -66,4 +66,35 @@ export const signedTransactionDelta = (transaction) => {
     return -amount;
   }
   return null;
+};
+
+/**
+ * /transaction/search/balance returns the matching transactions, not a total.
+ * Aggregate here so the MCP result never includes those rows or tokenDevice.
+ */
+export const summarizeTransactionTotals = (payload) => {
+  const rows = unwrapList(payload);
+  let income = 0;
+  let expense = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const delta = signedTransactionDelta(row);
+    if (delta == null) {
+      skipped += 1;
+      continue;
+    }
+    if (delta >= 0) {
+      income += delta;
+    } else {
+      expense += -delta;
+    }
+  }
+  return {
+    count: rows.length,
+    income: roundMoney(income),
+    expense: roundMoney(expense),
+    net: roundMoney(income - expense),
+    skipped,
+    incomplete: skipped > 0
+  };
 };
