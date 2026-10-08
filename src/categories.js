@@ -93,19 +93,29 @@ export const summarizeCategory = (category) => {
   };
 };
 
-export const matchGlobalCategory = (globalList, walletId, walletCategory) => {
-  const sameWallet = globalList.filter((category) => (category.account ?? category.walletId ?? '') === walletId);
-  const name = walletCategory.name ?? '';
-  const metadata = metadataKey(walletCategory.metadata);
-  const exact = sameWallet.find((category) => category.name === name && metadataKey(category.metadata) === metadata);
-  if (exact) {
-    return exact;
+const accountOf = (category) => category?.account ?? category?.walletId ?? '';
+
+const parentNameOf = (category) => {
+  const parent = category?.parent;
+  if (parent && typeof parent === 'object' && parent.name) {
+    return String(parent.name);
   }
-  const byName = sameWallet.filter((category) => category.name === name);
-  if (byName.length === 1) {
-    return byName[0];
+  if (typeof category?.parentName === 'string' && category.parentName) {
+    return category.parentName;
   }
-  return null;
+  return '';
+};
+
+const candidateLabel = (category) => {
+  const parent = parentNameOf(category);
+  const name = category?.name ?? '';
+  const id = category?._id ?? '';
+  return parent ? `${parent} / ${name} [${id}]` : `${name} [${id}]`;
+};
+
+const belongsToWallet = (category, walletId) => {
+  const account = accountOf(category);
+  return account === '' || account === walletId;
 };
 
 const filterByDirection = (categories, direction) => {
@@ -119,27 +129,33 @@ const filterByDirection = (categories, direction) => {
   return categories.filter((category) => Number(category.type) === expected);
 };
 
+/**
+ * Pick a category for one wallet.
+ * The wallet's own list is the authority. An id on that list is sent as-is.
+ * An id that another wallet owns is rejected. A name is matched only inside this wallet.
+ * Nothing falls back to a category named Others or Other expense.
+ */
 export const selectCategory = (walletList, globalList, walletId, { categoryId, categoryName, direction } = {}) => {
   const id = typeof categoryId === 'string' ? categoryId.trim() : '';
   const name = typeof categoryName === 'string' ? categoryName.trim() : '';
+  const walletRows = Array.isArray(walletList) ? walletList : [];
+  const globalRows = Array.isArray(globalList) ? globalList : [];
 
   if (id) {
-    const globalHit = globalList.find((category) => category._id === id);
+    const walletHit = walletRows.find((category) => category._id === id);
+    if (walletHit) {
+      if (!belongsToWallet(walletHit, walletId)) {
+        throw new Error('Category belongs to a different wallet');
+      }
+      return { category: walletHit, id: walletHit._id, source: 'wallet' };
+    }
+
+    const globalHit = globalRows.find((category) => category._id === id);
     if (globalHit) {
-      const account = globalHit.account ?? globalHit.walletId ?? '';
-      if (account && account !== walletId) {
+      if (!belongsToWallet(globalHit, walletId)) {
         throw new Error('Category belongs to a different wallet');
       }
       return { category: globalHit, id: globalHit._id, source: 'global' };
-    }
-
-    const walletHit = walletList.find((category) => category._id === id);
-    if (walletHit) {
-      const mapped = matchGlobalCategory(globalList, walletId, walletHit);
-      if (mapped) {
-        return { category: mapped, id: mapped._id, source: 'resolved' };
-      }
-      return { category: walletHit, id: walletHit._id, source: 'wallet' };
     }
     if (!name) {
       return { category: null, id, source: 'passthrough' };
@@ -151,25 +167,21 @@ export const selectCategory = (walletList, globalList, walletId, { categoryId, c
     throw new Error('categoryId or category is required');
   }
 
-  const named = walletList.filter(
-    (category) => category._id === label || String(category.name ?? '').toLowerCase() === label.toLowerCase()
+  const named = walletRows.filter(
+    (category) =>
+      belongsToWallet(category, walletId) &&
+      (category._id === label || String(category.name ?? '').toLowerCase() === label.toLowerCase())
   );
   const filtered = filterByDirection(named, direction);
   if (filtered.length === 1) {
-    const mapped = matchGlobalCategory(globalList, walletId, filtered[0]);
-    const chosen = mapped ?? filtered[0];
-    return {
-      category: chosen,
-      id: chosen._id,
-      source: mapped ? 'resolved-name' : 'wallet-name'
-    };
+    return { category: filtered[0], id: filtered[0]._id, source: 'wallet-name' };
   }
   if (filtered.length === 0) {
     const hint = direction ? ` (${direction})` : '';
     throw new Error(`No category named "${label}"${hint} in this wallet`);
   }
-  const candidates = filtered.map((category) => `${category.name} [${category._id}]`).join(', ');
+  const candidates = filtered.map((category) => candidateLabel(category)).join(', ');
   throw new Error(
-    `Category name "${label}" matches more than one category. Pass categoryId. Candidates: ${candidates}`
+    `Category name "${label}" matches more than one category in this wallet. Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
   );
 };

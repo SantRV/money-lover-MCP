@@ -383,6 +383,25 @@ const walletIdArgument = {
   walletId: z.string().min(1).describe('Wallet identifier')
 };
 
+const transactionDetailArguments = {
+  with: z.array(z.string()).optional().describe('People on the transaction ("with"). Omit for none.'),
+  excludeReport: z.boolean().optional().describe('Exclude this transaction from reports.'),
+  eventId: z.string().optional().describe('Event id from get_events.'),
+  reminder: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe('Reminder. Omit for none. Passed through as the API remind field.'),
+  longitude: z.union([z.string(), z.number()]).optional().describe('Location longitude. The API field is longtitude.'),
+  latitude: z.union([z.string(), z.number()]).optional().describe('Location latitude.'),
+  addressName: z.string().optional().describe('Location name.'),
+  addressDetails: z.string().optional().describe('Location details.'),
+  addressIcon: z.string().optional().describe('Location icon.'),
+  image: z
+    .string()
+    .optional()
+    .describe('Existing photo reference. This server does not upload files. The website accepts a photo under 2MB.')
+};
+
 const presentTransactions = (client, data) => {
   const transactions = unwrapList(data).map((transaction) => client.presentTransaction(transaction));
   const daterange = data && typeof data === 'object' && !Array.isArray(data) ? (data.daterange ?? null) : null;
@@ -467,7 +486,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Get Categories',
       description:
-        'Categories for one wallet. type 1 is income and type 2 is expense. systemLabel names built-in categories such as Other expense, Debt, and Repayment. parentId and walletId (account) are included when the API sends them. The id on this list can differ from the global id add_transaction needs; add_transaction resolves a wallet id when name and metadata match.',
+        'Categories for one wallet. Each wallet has its own tree, including parent and sub-categories, and some wallets have no Other expense category. type 1 is income and type 2 is expense. systemLabel names a built-in category when that metadata is present. Use the id from this wallet with add_transaction. Do not reuse a category id from another wallet, and do not assume a default Others category exists.',
       inputSchema: walletIdArgument,
       outputSchema: {
         categories: z.array(z.record(z.any()))
@@ -488,7 +507,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'List Categories',
       description:
-        'Compact category list for one wallet, grouped into income (type 1) and expense (type 2). Use this to map a bank statement payee to a category id or name before add_transactions.',
+        'Compact category list for one wallet, grouped into income (type 1) and expense (type 2), including parentId when the category is a sub-category. Map a statement payee to an id from this wallet. The same name in another wallet is a different category. Some wallets have no Other expense category.',
       inputSchema: walletIdArgument
     },
     guard(async ({ walletId }) => {
@@ -551,15 +570,23 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Add Transaction',
       description:
-        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2). categoryId may be a wallet id or a global id, and category may be a name. date YYYY-MM-DD is not timezone-shifted. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
+        'Create one transaction. Amount is sent as a positive magnitude; pick an income category (type 1) or expense category (type 2) from this wallet. categoryId is that wallet’s category id, and category may be a name that is unique in this wallet. date YYYY-MM-DD is not timezone-shifted. Optional fields match the website form: with, reminder, location, event, an existing photo reference, and exclude from report. This server does not upload a photo file. Set dryRun to preview. Set skipDuplicates to skip an existing transaction with the same wallet, date, absolute amount, and similar note.',
       inputSchema: {
         ...walletIdArgument,
-        categoryId: z.string().min(1).optional().describe('Category id from list_categories or get_categories'),
-        category: z.string().min(1).optional().describe('Category name, used when categoryId is omitted'),
+        categoryId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Category id from list_categories or get_categories for this wallet'),
+        category: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Category name in this wallet, used when categoryId is omitted. A shared name needs categoryId.'),
         amount: amountArgument,
         note: z.string().optional().describe('Payee or note'),
         date: dateArgument,
-        with: z.array(z.string()).optional().describe('Related people. Omit for none.'),
+        ...transactionDetailArguments,
         amountMode: z
           .enum(['magnitude', 'signed'])
           .optional()
@@ -613,7 +640,14 @@ const registerMoneyloverTools = (server) => {
               note: z.string().optional(),
               categoryId: z.string().min(1).optional(),
               category: z.string().min(1).optional(),
-              with: z.array(z.string()).optional()
+              with: z.array(z.string()).optional(),
+              excludeReport: z.boolean().optional(),
+              eventId: z.string().optional(),
+              reminder: z.union([z.string(), z.number()]).optional(),
+              longitude: z.union([z.string(), z.number()]).optional(),
+              latitude: z.union([z.string(), z.number()]).optional(),
+              addressName: z.string().optional(),
+              image: z.string().optional()
             })
           )
           .min(1)
@@ -1122,11 +1156,7 @@ const registerMoneyloverTools = (server) => {
         currentDate: dateArgument
           .optional()
           .describe('The transaction’s current day, used to find it. Use this when date is the new day.'),
-        categoryId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe('Replacement category id. Wallet ids are resolved when possible.'),
+        categoryId: z.string().min(1).optional().describe('Replacement category id from this wallet’s category list.'),
         category: z.string().min(1).optional().describe('Replacement category name.'),
         amount: amountArgument.optional(),
         date: dateArgument.optional().describe('New calendar date. Omit to keep the current day.'),
@@ -1137,7 +1167,22 @@ const registerMoneyloverTools = (server) => {
           .string()
           .optional()
           .describe('Event id. Omit to keep the current event. Pass an empty string to clear it.'),
-        image: z.string().optional().describe('Image reference. Omit to keep the current image.'),
+        reminder: z.union([z.string(), z.number()]).optional().describe('Reminder. Omit to keep the current reminder.'),
+        longitude: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe('Location longitude. Omit to keep the current value.'),
+        latitude: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe('Location latitude. Omit to keep the current value.'),
+        addressName: z.string().optional().describe('Location name. Omit to keep the current value.'),
+        addressDetails: z.string().optional().describe('Location details. Omit to keep the current value.'),
+        addressIcon: z.string().optional().describe('Location icon. Omit to keep the current value.'),
+        image: z
+          .string()
+          .optional()
+          .describe('Existing photo reference. Omit to keep the current image. This server does not upload files.'),
         parentId: z.string().optional().describe('Debt or loan parent transaction id.'),
         dryRun: dryRunArgument
       }
@@ -1312,7 +1357,7 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Transfer Money',
       description:
-        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Categories default to Outgoing transfer, Incoming transfer, and Other expense. dryRun previews the legs.',
+        'Move money between two of your wallets in one /transaction/add-multi call: an outgoing leg, an incoming leg, and an optional fee leg. Use this for a bank-to-card payment so it is not counted as both spending and income. Outgoing transfer, Incoming transfer, and Other expense are used only when that metadata exists on that wallet. If it does not, pass fromCategoryId, toCategoryId, or feeCategoryId from that wallet’s list. There is no default Others category. dryRun previews the legs.',
       inputSchema: {
         fromWalletId: z.string().min(1),
         toWalletId: z.string().min(1),
@@ -1329,9 +1374,22 @@ const registerMoneyloverTools = (server) => {
           .optional()
           .describe('Wallet charged for the fee. Defaults to the source wallet.'),
         feeNote: z.string().optional(),
-        fromCategoryId: z.string().optional(),
-        toCategoryId: z.string().optional(),
-        feeCategoryId: z.string().optional(),
+        fromCategoryId: z
+          .string()
+          .optional()
+          .describe(
+            'Outgoing category on the source wallet. Required when that wallet has no Outgoing transfer category.'
+          ),
+        toCategoryId: z
+          .string()
+          .optional()
+          .describe(
+            'Incoming category on the destination wallet. Required when that wallet has no Incoming transfer category.'
+          ),
+        feeCategoryId: z
+          .string()
+          .optional()
+          .describe('Fee category on the fee wallet. Required when that wallet has no Other expense category.'),
         excludeReport: z.boolean().optional(),
         dryRun: dryRunArgument
       }
@@ -1344,13 +1402,18 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'Adjust Balance',
       description:
-        'Set a wallet balance by adding one transaction for the difference, in the wallet Other income category when the balance must rise and Other expense when it must fall. This is what the web app’s adjust-balance action does. dryRun previews the transaction.',
+        'Set a wallet balance by adding one transaction for the difference. When the balance must rise, the category is this wallet’s Other income category. When it must fall, it is this wallet’s Other expense category. Those are used only when that metadata exists on this wallet. If it does not, pass categoryId from list_categories for this wallet. There is no default Others category. dryRun previews the transaction.',
       inputSchema: {
         ...walletIdArgument,
         balance: z.union([z.number(), z.string()]).describe('The balance the wallet should show after the adjustment.'),
         date: dateArgument.optional().describe('Adjustment date. Default is today in MONEYLOVER_TIMEZONE.'),
         note: z.string().optional().describe('Note. Default "Balance adjustment".'),
-        categoryId: z.string().optional().describe('Override the Other income or Other expense category.'),
+        categoryId: z
+          .string()
+          .optional()
+          .describe(
+            'Category id from this wallet. Required when this wallet has no Other income or Other expense category.'
+          ),
         excludeReport: z.boolean().optional(),
         dryRun: dryRunArgument
       }

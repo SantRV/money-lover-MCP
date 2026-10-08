@@ -313,7 +313,7 @@ describe('MoneyloverClient', () => {
       expect(body.note).toBe('test');
     });
 
-    it('addTransaction resolves wallet-specific category to global ID', async () => {
+    it('keeps the wallet category id instead of swapping it for another list', async () => {
       global.fetch.mockResolvedValueOnce(
         allCatsOk([{ _id: 'cat-w1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
       );
@@ -331,7 +331,60 @@ describe('MoneyloverClient', () => {
       });
       expect(global.fetch).toHaveBeenCalledTimes(3);
       const body = JSON.parse(global.fetch.mock.calls[2][1].body);
-      expect(body.category).toBe('cat-g1');
+      expect(body.category).toBe('cat-w1');
+      expect(body.event).toBeUndefined();
+      expect(body.image).toBeUndefined();
+    });
+
+    it('sends reminder, location, event, and exclude-from-report when they are set', async () => {
+      global.fetch.mockResolvedValueOnce(
+        allCatsOk([{ _id: 'cat-w1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+      );
+      global.fetch.mockResolvedValueOnce(allCatsOk([]));
+      global.fetch.mockResolvedValueOnce(ok({ _id: 'new-txn' }));
+
+      await new MoneyloverClient('t').addTransaction({
+        walletId: 'w1',
+        categoryId: 'cat-w1',
+        amount: '12',
+        date: '2026-04-18',
+        note: 'Lunch',
+        excludeReport: true,
+        eventId: 'event-1',
+        reminder: 1710000000,
+        longitude: '138.6',
+        latitude: '-34.9',
+        addressName: 'Adelaide',
+        image: 'pic.jpg'
+      });
+      const body = JSON.parse(global.fetch.mock.calls[2][1].body);
+      expect(body).toMatchObject({
+        category: 'cat-w1',
+        exclude_report: true,
+        event: 'event-1',
+        remind: 1710000000,
+        longtitude: '138.6',
+        latitude: '-34.9',
+        addressName: 'Adelaide',
+        image: 'pic.jpg'
+      });
+    });
+
+    it('refuses a photo upload and keeps the website size limit in the error', async () => {
+      global.fetch.mockResolvedValueOnce(
+        allCatsOk([{ _id: 'cat-w1', account: 'w1', name: 'Food', metadata: 'food0', type: 2 }])
+      );
+      global.fetch.mockResolvedValueOnce(allCatsOk([]));
+      await expect(
+        new MoneyloverClient('t').addTransaction({
+          walletId: 'w1',
+          categoryId: 'cat-w1',
+          amount: '12',
+          date: '2026-04-18',
+          image: { name: 'lunch.jpg' }
+        })
+      ).rejects.toThrow(/under 2MB/);
+      expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
     });
 
     it('sends a positive magnitude for a negative expense and keeps the calendar date', async () => {

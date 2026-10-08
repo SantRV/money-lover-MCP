@@ -31,15 +31,42 @@ describe('categories', () => {
     expect(categoryTypeName(2)).toBe('expense');
   });
 
-  it('resolves a wallet category id to the global id', () => {
+  it('keeps the wallet category id when another list has the same name', () => {
     const resolved = selectCategory(wallet, global, 'w1', { categoryId: 'local-food' });
-    expect(resolved.id).toBe('global-food');
-    expect(resolved.source).toBe('resolved');
+    expect(resolved.id).toBe('local-food');
+    expect(resolved.source).toBe('wallet');
   });
 
-  it('resolves a name within the requested direction', () => {
-    const resolved = selectCategory(wallet, global, 'w1', { categoryName: 'salary', direction: 'income' });
-    expect(resolved.id).toBe('global-pay');
+  it('resolves a name only inside this wallet', () => {
+    const resolved = selectCategory(
+      [...wallet, { _id: 'w9-pay', name: 'Salary', type: 1, account: 'w9', metadata: 'salary0' }],
+      global,
+      'w1',
+      { categoryName: 'salary', direction: 'income' }
+    );
+    expect(resolved.id).toBe('local-pay');
+    expect(resolved.source).toBe('wallet-name');
+  });
+
+  it('does not use another wallet when the name is missing here', () => {
+    expect(() =>
+      selectCategory([{ _id: 'w9-food', name: 'Food', type: 2, account: 'w9' }], global, 'w1', { categoryName: 'Food' })
+    ).toThrow(/No category named "Food"/);
+  });
+
+  it('asks for a category id when parent and child names collide', () => {
+    const tree = [
+      { _id: 'g1', name: 'Groceries', type: 2, account: 'w1', parent: { _id: 'p1', name: 'Food' } },
+      { _id: 'g2', name: 'Groceries', type: 2, account: 'w1', parent: { _id: 'p2', name: 'Household' } }
+    ];
+    expect(() => selectCategory(tree, [], 'w1', { categoryName: 'Groceries' })).toThrow(
+      /Food \/ Groceries \[g1\].*Household \/ Groceries \[g2\]/
+    );
+  });
+
+  it('does not substitute Other expense when the requested name is missing', () => {
+    const list = [{ _id: 'other', name: 'Other expense', type: 2, account: 'w1', metadata: 'IS_OTHER_EXPENSE' }];
+    expect(() => selectCategory(list, [], 'w1', { categoryName: 'Coffee' })).toThrow(/No category named "Coffee"/);
   });
 
   it('refuses a category from another wallet', () => {

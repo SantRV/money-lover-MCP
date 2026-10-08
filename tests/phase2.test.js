@@ -142,11 +142,11 @@ describe('phase 2 API behaviour', () => {
     const body = JSON.parse(post[1].body);
     expect(body.action).toBe('transfermoney');
     expect(body.transactions).toHaveLength(3);
-    expect(body.transactions[0]).toMatchObject({ account: 'from', category: 'out', amount: 40, related: true });
-    expect(body.transactions[1]).toMatchObject({ account: 'to', category: 'in', amount: 40, related: true });
+    expect(body.transactions[0]).toMatchObject({ account: 'from', category: 'out-local', amount: 40, related: true });
+    expect(body.transactions[1]).toMatchObject({ account: 'to', category: 'in-local', amount: 40, related: true });
     expect(body.transactions[2]).toMatchObject({
       account: 'from',
-      category: 'fee',
+      category: 'fee-local',
       amount: 1.5,
       isFee: true,
       related: true
@@ -179,11 +179,54 @@ describe('phase 2 API behaviour', () => {
     const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
     expect(JSON.parse(post[1].body)).toMatchObject({
       account: 'w1',
-      category: 'other',
+      category: 'other-local',
       amount: '30',
       displayDate: '2026-04-18',
       note: 'Balance adjustment'
     });
+  });
+
+  it('refuses a balance adjustment when this wallet has no Other expense category', async () => {
+    global.fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/wallet/balance')) {
+        return json({ balance: [80] });
+      }
+      if (path.endsWith('/category/list')) {
+        return json([{ _id: 'food', account: 'w1', name: 'Food', type: 2 }]);
+      }
+      return json({ _id: 'should-not-post' });
+    });
+
+    await expect(
+      new MoneyloverClient('t').adjustBalance({ walletId: 'w1', balance: 50, date: '2026-04-18' })
+    ).rejects.toThrow(/categoryId/);
+    expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
+  });
+
+  it('adjusts with an explicit category from this wallet when Other expense is absent', async () => {
+    global.fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/wallet/balance')) {
+        return json({ balance: [80] });
+      }
+      if (path.endsWith('/category/list')) {
+        return json([{ _id: 'food', account: 'w1', name: 'Food', metadata: 'food', type: 2 }]);
+      }
+      if (path.endsWith('/category/list-all')) {
+        return json([{ _id: 'food-other-wallet', account: 'w9', name: 'Food', type: 2 }]);
+      }
+      return json({ _id: 'adj-2' });
+    });
+
+    await new MoneyloverClient('t').adjustBalance({
+      walletId: 'w1',
+      balance: 50,
+      date: '2026-04-18',
+      categoryId: 'food'
+    });
+    const post = global.fetch.mock.calls.find((call) => String(call[0]).endsWith('/transaction/add'));
+    expect(JSON.parse(post[1].body).category).toBe('food');
   });
 
   it('reads a balance array and signs income and expense', () => {

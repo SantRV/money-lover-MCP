@@ -95,7 +95,19 @@ export const createTransactions = async (client, options) => {
         amountMode: row.amountMode ?? amountMode,
         timeZone,
         dateOrder: options.dateOrder,
-        direction: row.direction
+        direction: row.direction,
+        excludeReport: row.excludeReport,
+        eventId: row.eventId,
+        event: row.event,
+        remind: row.remind,
+        reminder: row.reminder,
+        longtitude: row.longtitude,
+        longitude: row.longitude,
+        latitude: row.latitude,
+        addressName: row.addressName,
+        addressDetails: row.addressDetails,
+        addressIcon: row.addressIcon,
+        image: row.image
       });
       const noteForMatch = stripBatchMarker(prepared.note);
       const storedNote = withBatchMarker(prepared.note, batchId);

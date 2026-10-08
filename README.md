@@ -79,8 +79,8 @@ Optional: `MONEYLOVER_MCP_ENV_FILE` points at a dotenv file. `MONEYLOVER_MCP_DIS
 - Category type `1` is **income** and type `2` is **expense**. This matches the Go client and the Money Lover CLI. `list_categories` returns `typeName` so a statement can be mapped without guessing.
 - Money Lover stores a **positive** amount. The category type decides income versus expense. A leading minus is accepted on an expense category (typical bank debit) and rejected on an income category, so a negative salary is not filed as income.
 - `edit_transaction` reads the current transaction, then writes the full record back. Pass `walletId` and `currentDate` so it can be found. Omit a field to keep it. The written payload includes `exclude_report`, event, image, reminder, location, and a debt parent when the row has one.
-- Wallet category ids are resolved to the global id when the name and metadata match. Money Lover can reject the id returned by the wallet category list, so a transaction is sent with the global id when one matches. If none matches, the wallet id is sent and the result includes a warning.
-- `list_categories` includes `systemLabel` for built-in categories (Other expense, Other income, Debt, Loan, Repayment, and the transfer categories), plus `parentId` and `walletId`.
+- Categories belong to one wallet. `list_categories` for that wallet is the id to send. The same name on another wallet is a different category, and a parent and a sub-category can share a name, so a collision asks for `categoryId`. Lookup does not replace a wallet’s id with an id from another list, and it does not fall back to a category named Others or Other expense.
+- `list_categories` includes `systemLabel` when the API sends built-in metadata (Other expense, Other income, Debt, Loan, Repayment, and the transfer categories), plus `parentId` and `walletId`. Some wallets have no Other expense category. `adjust_balance` and a transfer fee then need an explicit `categoryId` from that wallet.
 - `add_category` takes `parentId` for a sub-category. `type` 1 is income and `type` 2 is expense.
 - Australian dollars are currency id **20**. `edit_wallet` reads the wallet first and sends `account_type` (4 is a credit wallet), `exclude_total`, and `archived` back so a rename does not drop them.
 - A transfer between your own wallets is `transfer_money` (`/transaction/add-multi` with a from leg, a to leg, and an optional fee). Recording both sides as normal expenses double-counts a card payment.
@@ -114,7 +114,7 @@ The server registers 48 tools. Authentication is read from the environment. Tool
 | `whoami`                               | Check the session: email, wallet counts, and the `user_category_v2` tag. No token.                                                                                                          |
 | `edit_wallet`                          | Update a wallet. Keeps credit type, exclude-from-total, and archived. AUD is currency id 20.                                                                                                |
 | `delete_wallet`                        | Delete a wallet. Requires `confirm: true`.                                                                                                                                                  |
-| `get_categories`                       | Categories for one wallet, with `typeName`, `systemLabel`, parent, and wallet.                                                                                                              |
+| `get_categories`                       | Categories for one wallet, with `typeName`, `systemLabel`, parent, and wallet. Use these ids for that wallet only.                                                                          |
 | `list_categories`                      | Compact income and expense lists for mapping a statement.                                                                                                                                   |
 | `get_all_categories`                   | Categories across your wallets, paged. Records tied to another wallet id are left out.                                                                                                      |
 | `add_category`                         | Create a category. `type` 1 income, 2 expense. Optional `parentId` for a sub-category.                                                                                                      |
@@ -122,7 +122,7 @@ The server registers 48 tools. Authentication is read from the environment. Tool
 | `delete_category`                      | Delete a category. Requires `confirm: true`.                                                                                                                                                |
 | `merge_categories`                     | Merge `fromCategoryId` into `toCategoryId` (`/category/merge`). Requires `confirm: true`.                                                                                                   |
 | `get_transactions`                     | Transactions between two dates. `displayDate` is `YYYY-MM-DD`. Default page size 500. `truncated` and `nextOffset` say when to continue.                                                    |
-| `add_transaction`                      | Create one transaction. Optional `dryRun` and `skipDuplicates`.                                                                                                                             |
+| `add_transaction`                      | Create one transaction. Optional note, with, reminder, location, event, photo reference, exclude from report, `dryRun`, and `skipDuplicates`.                                               |
 | `add_transactions`                     | Create up to 200 transactions. Per-row results, a batch marker, and a local id log. `skipDuplicates` defaults to true.                                                                      |
 | `import_transactions_csv`              | Parse a bank CSV (date, amount and/or debit/credit, description). Australian `DD/MM/YYYY` when the order is ambiguous. Returns parsed rows instead of writing when no category is supplied. |
 | `edit_transaction`                     | Read the row, merge your changes, write the full record.                                                                                                                                    |
@@ -130,7 +130,7 @@ The server registers 48 tools. Authentication is read from the environment. Tool
 | `transfer_money`                       | Move money between two wallets, with an optional fee leg.                                                                                                                                   |
 | `search_transactions`                  | Search with `accounts`, `categoryIDs`, dates, `note`, `with`, and `amount`. `limit` and `offset` go to the API.                                                                             |
 | `search_transaction_totals`            | Totals for that filter (`/transaction/search/balance`).                                                                                                                                     |
-| `adjust_balance`                       | Post the difference to Other income or Other expense so the wallet matches a balance.                                                                                                       |
+| `adjust_balance`                       | Post the difference so the wallet matches a balance. Uses Other income or Other expense only when that category exists on this wallet.                                                      |
 | `get_balance_as_of`                    | Balance at the end of a date, from the current balance minus later transactions.                                                                                                            |
 | `undo_import`                          | Delete one import batch. Requires `confirm: true`.                                                                                                                                          |
 | `get_budgets`                          | Budgets for one wallet or all wallets.                                                                                                                                                      |
@@ -202,12 +202,24 @@ Tests mock `fetch`. They do not call Money Lover and do not need credentials. Gi
 
 `tests/mcp-tester/` contains optional live scenarios inherited from the upstream project. They need real credentials and an external tester, and CI does not run them.
 
+## This account
+
+Observed in the owner’s browser on 8 October 2026, on `web.moneylover.me`, not through this server:
+
+- The account is Premium.
+- The wallets are Australian dollars, except possibly one. AUD is currency id 20. Confirm with `get_currencies`.
+- Each wallet has its own category tree, on the order of 100 categories, with parent and sub-categories. Some wallets have no Other expense category.
+- The transaction form offers wallet, category, amount, date, note, with, reminder, location, event, a photo under 2MB, and exclude from report.
+- Adding a transaction and deleting it both succeeded. There was no read-only notice and no error.
+
+`add_transaction` and `edit_transaction` can send note, with, reminder, location, event, exclude from report, and an existing photo reference. This server does not upload a photo file. The website limit is under 2MB.
+
 ## Known limits of the web API
 
 These are properties of Money Lover, not something this server can turn off:
 
-- Money Lover’s support site has said since August 2024 that the website is read-only for adding transactions. A write that comes back as read-only is returned as that error, with code `READ_ONLY`.
-- The site sits behind Cloudflare. A challenge (HTTP 403, “Just a moment”, or a Cloudflare interstitial) is returned as code `CLOUDFLARE`. Another Money Lover project reports that writes then need the browser `cf_clearance` cookie and a matching User-Agent. This server does not send a browser cookie.
+- A browser session on this account could add and delete transactions on 8 October 2026. An August 2024 support note said the website was read-only for adding transactions; that notice was not shown in this browser session. A response that still says the API is read-only is returned as code `READ_ONLY`. Whether a headless client can write without a Cloudflare cookie is unverified.
+- The site sits behind Cloudflare. A challenge (HTTP 403, “Just a moment”, or a Cloudflare interstitial) is returned as code `CLOUDFLARE`. Writes from a non-browser client may need the browser `cf_clearance` cookie and a matching User-Agent. This server does not send a browser cookie.
 - Accounts tagged `user_category_v2` have category and budget changes disabled in the web app. A failed category or budget write on such an account is returned as code `USER_CATEGORY_V2`. `whoami` reports the tag. Transaction import is not blocked by that tag.
 - Expired sessions come back as JSON `e: 706` (“Not authorized error”). The server calls `/user/refresh-token` with the stored refresh token when it has one, then logs in again with email and password. `e: 717` is device not found and `e: 718` is device blocked. Those two are not refreshed; the message says to fix the device in the Money Lover app. The archived web bundle compares the numbers and does not include those English labels, so the 717/718 wording follows that review.
 - There is no separate balance-as-of endpoint. `get_balance_as_of` derives the figure from the current balance and later transactions.
@@ -215,7 +227,9 @@ These are properties of Money Lover, not something this server can turn off:
 
 ## What could not be checked against a live account
 
-No Money Lover credentials were available, so none of this was exercised against `web.moneylover.me`:
+The owner added and deleted one transaction in the browser on 8 October 2026. This server was not pointed at the live API. No credentials are stored here, and a headless write without a Cloudflare cookie was not tried.
+
+Still unchecked:
 
 - Whether `/category/list-all` returns only the signed-in user's categories or a much larger catalogue. `get_all_categories` drops rows whose `account` is another wallet, but it still has to download the response.
 - Whether `/transaction/list` or `/transaction/search` silently cap the number of rows on the server. The tools page whatever they receive and set `truncated` when the page is shorter than the list in hand.

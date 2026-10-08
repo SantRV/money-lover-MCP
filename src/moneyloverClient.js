@@ -2,7 +2,6 @@ import { prepareAmount, amountCents, formatAmount, parseAmount } from './amounts
 import {
   CategoryType,
   coerceCategoryType,
-  matchGlobalCategory,
   selectCategory,
   summarizeCategory,
   systemCategoryLabel,
@@ -84,12 +83,25 @@ const copyText = (value) => (value == null ? '' : String(value));
 
 const resolutionWarning = (source) => {
   if (source === 'passthrough') {
-    return 'Category id was not found on this wallet. It was sent unchanged.';
-  }
-  if (source === 'wallet' || source === 'wallet-name') {
-    return 'No matching global category id was found. The wallet category id was sent. Money Lover may reject a wallet-local id.';
+    return 'Category id was not found on this wallet. It was sent unchanged. Pass a category id from list_categories for this wallet.';
   }
   return null;
+};
+
+const textIfSet = (value) => {
+  if (value == null || value === '') {
+    return null;
+  }
+  return String(value);
+};
+
+const photoReference = (image) => {
+  if (typeof image !== 'string') {
+    throw new Error(
+      'image must be an existing photo reference. This server does not upload photo files. The website accepts a photo under 2MB.'
+    );
+  }
+  return image;
 };
 
 export class MoneyloverClient {
@@ -500,6 +512,38 @@ export class MoneyloverClient {
     if (params.excludeReport != null) {
       payload.exclude_report = Boolean(params.excludeReport);
     }
+    const eventId = textIfSet(params.eventId ?? (typeof params.event === 'string' ? params.event : null));
+    if (eventId) {
+      payload.event = eventId;
+    }
+    if (params.remind != null) {
+      payload.remind = params.remind;
+    } else if (params.reminder != null) {
+      payload.remind = params.reminder;
+    }
+    const longtitude = textIfSet(params.longtitude ?? params.longitude);
+    const latitude = textIfSet(params.latitude);
+    const addressName = textIfSet(params.addressName);
+    const addressDetails = textIfSet(params.addressDetails);
+    const addressIcon = textIfSet(params.addressIcon);
+    if (longtitude) {
+      payload.longtitude = longtitude;
+    }
+    if (latitude) {
+      payload.latitude = latitude;
+    }
+    if (addressName) {
+      payload.addressName = addressName;
+    }
+    if (addressDetails) {
+      payload.addressDetails = addressDetails;
+    }
+    if (addressIcon) {
+      payload.addressIcon = addressIcon;
+    }
+    if (params.image != null) {
+      payload.image = photoReference(params.image);
+    }
 
     return {
       payload,
@@ -603,13 +647,20 @@ export class MoneyloverClient {
           : [],
       event: params.eventId != null ? String(params.eventId) : nestedId(existing.event),
       exclude_report: params.excludeReport != null ? Boolean(params.excludeReport) : Boolean(existing.exclude_report),
-      longtitude: copyText(existing.longtitude),
-      latitude: copyText(existing.latitude),
-      addressName: copyText(existing.addressName),
-      addressDetails: copyText(existing.addressDetails),
-      addressIcon: copyText(existing.addressIcon),
-      remind: existing.remind ?? '',
-      image: params.image != null ? String(params.image) : copyText(existing.images?.[0] ?? existing.image ?? '')
+      longtitude:
+        params.longtitude != null
+          ? String(params.longtitude)
+          : params.longitude != null
+            ? String(params.longitude)
+            : copyText(existing.longtitude),
+      latitude: params.latitude != null ? String(params.latitude) : copyText(existing.latitude),
+      addressName: params.addressName != null ? String(params.addressName) : copyText(existing.addressName),
+      addressDetails: params.addressDetails != null ? String(params.addressDetails) : copyText(existing.addressDetails),
+      addressIcon: params.addressIcon != null ? String(params.addressIcon) : copyText(existing.addressIcon),
+      remind:
+        params.remind != null ? params.remind : params.reminder != null ? params.reminder : (existing.remind ?? ''),
+      image:
+        params.image != null ? photoReference(params.image) : copyText(existing.images?.[0] ?? existing.image ?? '')
     };
     const parent = params.parentId != null ? String(params.parentId) : nestedId(existing.parent);
     if (parent) {
@@ -768,16 +819,26 @@ export class MoneyloverClient {
       return resolved.id;
     }
     const walletList = await this.#walletCategories(walletId);
-    const globalList = await this.#globalCategories();
-    const matches = walletList.filter((category) => String(category.metadata ?? '') === metadata);
-    const owned = matches.filter((category) => (category.account ?? category.walletId ?? walletId) === walletId);
-    const hit = (owned.length > 0 ? owned : matches)[0];
-    if (!hit) {
-      const label = systemCategoryLabel(metadata) ?? metadata;
-      throw new Error(`No ${label} category (${metadata}) on wallet ${walletId}`);
+    const matches = walletList.filter((category) => {
+      if (String(category.metadata ?? '') !== metadata) {
+        return false;
+      }
+      const account = category.account ?? category.walletId ?? '';
+      return account === '' || account === walletId;
+    });
+    const label = systemCategoryLabel(metadata) ?? metadata;
+    if (matches.length === 0) {
+      throw new Error(
+        `Wallet ${walletId} has no "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Do not assume a default Others category exists.`
+      );
     }
-    const mapped = matchGlobalCategory(globalList, walletId, hit);
-    return (mapped ?? hit)._id;
+    if (matches.length > 1) {
+      const candidates = matches.map((category) => `${category.name} [${category._id}]`).join(', ');
+      throw new Error(
+        `Wallet ${walletId} has more than one "${label}" category (${metadata}). Pass categoryId from list_categories for this wallet. Candidates: ${candidates}`
+      );
+    }
+    return matches[0]._id;
   }
 
   async transferMoney(params) {
@@ -1145,6 +1206,6 @@ export class MoneyloverClient {
   }
 }
 
-export { MoneyloverApiError, CategoryType, matchGlobalCategory, isAuthError };
+export { MoneyloverApiError, CategoryType, isAuthError };
 
 export default MoneyloverClient;

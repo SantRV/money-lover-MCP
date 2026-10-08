@@ -161,7 +161,7 @@ Response:  {}
 
 ### `get_categories`
 
-Returns categories scoped to a single wallet (wallet-specific IDs). Use these IDs with `add_transaction` and `edit_transaction` — the server resolves them to global IDs automatically.
+Returns the category tree for one wallet. Use these ids with `add_transaction` and `edit_transaction` for that same wallet. Each wallet has its own tree. A name can appear under more than one parent, and some wallets have no Other expense category. Do not reuse an id from another wallet.
 
 ```
 Prompt: "List the categories in wallet 590f65bec16649948da1f4cfb94870c6."
@@ -174,7 +174,7 @@ Response:  { "categories": [{ "_id": "225c6924...", "name": "Food & Drink", "typ
 
 ### `get_all_categories`
 
-Returns all categories across every wallet, using global IDs. Use these IDs when calling `edit_transaction` directly without the auto-resolve path.
+Returns categories across wallets. Prefer `list_categories` for the wallet you are writing to. An id whose `account` is a different wallet is rejected.
 
 ```
 Prompt: "Give me all my Money Lover categories."
@@ -253,10 +253,10 @@ Response:  { "transactions": [{ "_id": "bfa8b033...", "amount": 50000, "note": "
 
 ### `add_transaction`
 
-Creates a transaction. `categoryId` can be a wallet-specific ID (from `get_categories`) or a global ID (from `get_all_categories`) — the server resolves wallet-specific IDs to global IDs automatically before posting.
+Creates a transaction. `categoryId` is an id from `list_categories` or `get_categories` for this wallet. A category name is matched only inside that wallet. The id is not swapped for a category on another wallet, and a missing name is not replaced with Other expense.
 
-**Required:** `walletId`, `categoryId`, `amount` (string), `date` (YYYY-MM-DD)  
-**Optional:** `note`, `with` (array of party names)
+**Required:** `walletId`, `categoryId` or `category`, `amount` (string), `date` (YYYY-MM-DD)  
+**Optional:** `note`, `with`, `excludeReport`, `eventId`, `reminder`, `longitude`, `latitude`, `addressName`, `image` (an existing photo reference; this server does not upload a file, and the website limit is under 2MB)
 
 ```
 Prompt: "In wallet 590f65bec16649948da1f4cfb94870c6, add a 50000 COP food expense for today (2026-04-18) with note 'Lunch', category 225c6924c4f143909851daeb75627928."
@@ -273,7 +273,7 @@ Tool call: add_transaction({
 Response:  { "_id": "webXXX...", "amount": 50000, "note": "Lunch", "displayDate": "2026-04-18" }
 ```
 
-> **Category ID resolution:** Passing a wallet-specific category ID is safe — `add_transaction` resolves it internally. If resolution fails (category not found in either list), the original ID is used as a fallback.
+> **Category id:** Pass the id from this wallet’s category list. If that id is not on the wallet, the call warns and sends it unchanged. A name that matches a parent and a sub-category returns both ids and writes nothing.
 
 ### `edit_transaction`
 
