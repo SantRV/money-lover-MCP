@@ -427,4 +427,51 @@ describe('phase 2 API behaviour', () => {
     ).rejects.toMatchObject({ code: 'CATEGORY_NOT_USABLE' });
     expect(global.fetch.mock.calls.some((call) => String(call[0]).endsWith('/transaction/add'))).toBe(false);
   });
+
+  it('keeps duplicate stored ids and marks a name that matches two picker rows', async () => {
+    global.fetch = vi.fn(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/category/list-all')) {
+        return json([
+          { _id: 'cap-a', account: 'w1', name: 'Capital Investment', type: 2 },
+          { _id: 'cap-b', account: 'w1', name: 'Capital Investment', type: 2 },
+          { _id: 'fees', account: 'w1', name: 'Bank fees', type: 2 }
+        ]);
+      }
+      if (path.endsWith('/category/list')) {
+        return json([
+          { _id: 'stored-a', account: 'w1', name: 'Capital Investment', type: 2, group: 0 },
+          { _id: 'stored-b', account: 'w1', name: 'Capital Investment', type: 2, group: 0 },
+          { _id: 'fees-1', account: 'w1', name: 'Bank fees', type: 2, group: 0 },
+          { _id: 'fees-2', account: 'w1', name: 'Bank fees', type: 2, group: 0 },
+          {
+            _id: 'other',
+            account: 'w1',
+            name: 'Other Expense',
+            metadata: 'IS_OTHER_EXPENSE',
+            type: 2,
+            group: 0
+          }
+        ]);
+      }
+      return json({});
+    });
+
+    const listed = await new MoneyloverClient('t').listWalletCategories('w1', { includeUnusable: true });
+    expect(listed.categories.map((category) => category.addId)).toEqual(['cap-a', 'cap-b', 'fees']);
+    expect(listed.categories.find((category) => category.name === 'Bank fees')).toMatchObject({
+      storedId: 'fees-1',
+      storedIds: ['fees-1', 'fees-2']
+    });
+    expect(listed.unusable.map((category) => [category.id, category.reason])).toEqual([
+      ['stored-a', 'ambiguous'],
+      ['stored-b', 'ambiguous'],
+      ['other', 'not_in_list_all']
+    ]);
+    expect(listed.unusable[0].candidates).toEqual([
+      { id: 'cap-a', addId: 'cap-a', name: 'Capital Investment', type: 2 },
+      { id: 'cap-b', addId: 'cap-b', name: 'Capital Investment', type: 2 }
+    ]);
+    expect(global.fetch.mock.calls.filter((call) => String(call[0]).endsWith('/category/list-all'))).toHaveLength(1);
+  });
 });

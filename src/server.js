@@ -610,14 +610,14 @@ const registerMoneyloverTools = (server) => {
     {
       title: 'List Categories',
       description:
-        'Categories the website add form offers for one wallet: POST /category/list-all rows with account equal to this wallet. id and addId are the id to send on /transaction/add. The same add id can appear on other wallets; pair it with this walletId. Set includeUnusable to also list stored /category/list rows the picker does not offer, each with a reason. Some wallets have no Other expense category.',
+        'Categories the website add form offers for one wallet: POST /category/list-all rows with account equal to this wallet. id and addId are the id to send on /transaction/add. The same add id can appear on other wallets; pair it with this walletId. Loan and Repayment are included when list-all has them; the website shows those on the debt tab. Set includeUnusable to also list stored /category/list rows the picker does not offer, each with a reason. Some wallets have no Other expense category.',
       inputSchema: {
         ...walletIdArgument,
         includeUnusable: z
           .boolean()
           .optional()
           .describe(
-            'When true, also return stored /category/list rows that are not in the add picker, with reason and code CATEGORY_NOT_USABLE. Default false.'
+            'When true, also return stored /category/list rows that are not a single add-picker category, with reason and code CATEGORY_NOT_USABLE. reason is not_in_list_all, ambiguous, deleted, hidden, uncategorized, or different_wallet. ambiguous includes the candidate add ids. Default false.'
           )
       }
     },
@@ -630,6 +630,7 @@ const registerMoneyloverTools = (server) => {
         id: category.id,
         addId: category.addId,
         ...(category.storedId ? { storedId: category.storedId } : {}),
+        ...(category.storedIds?.length > 1 ? { storedIds: category.storedIds } : {}),
         name: category.name,
         type: category.type,
         typeName: category.typeName,
@@ -653,6 +654,7 @@ const registerMoneyloverTools = (server) => {
           metadata: category.metadata,
           walletId: category.walletId,
           reason: category.reason,
+          ...(category.candidates ? { candidates: category.candidates } : {}),
           code: category.code
         }));
       }

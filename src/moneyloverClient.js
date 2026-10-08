@@ -109,6 +109,8 @@ const notUsableError = (label, reason) => {
   const why = {
     not_in_list_all:
       'It is on the stored /category/list catalogue. The website add picker is /category/list-all for this wallet, and this category is not in it.',
+    ambiguous:
+      'More than one add-picker category has this name. Pass one of the candidate add ids from list_categories.',
     uncategorized: 'The website drops uncategorized categories from the add picker.',
     deleted: 'It is marked deleted on the stored category list.',
     hidden: 'It is hidden or archived on the stored category list.',
@@ -462,19 +464,35 @@ export class MoneyloverClient {
     for (const category of stored) {
       const mapped = categoryIdForAdd({ category, id: category._id }, addRows);
       if (mapped?.id) {
-        const hit = categories.find((row) => row.addId === mapped.id && !row.storedId);
+        const hit = categories.find((row) => row.addId === mapped.id);
         if (hit) {
-          hit.storedId = category._id;
+          hit.storedIds = hit.storedIds ?? [];
+          if (!hit.storedIds.includes(category._id)) {
+            hit.storedIds.push(category._id);
+          }
+          if (!hit.storedId) {
+            hit.storedId = category._id;
+          }
         }
         continue;
       }
-      const reason = unusableCategoryReason(category, id);
-      unusable.push({
+      const summary = {
         ...summarizeCategory(category),
         usable: false,
-        reason,
         code: CATEGORY_NOT_USABLE
-      });
+      };
+      if (mapped?.ambiguous) {
+        summary.reason = 'ambiguous';
+        summary.candidates = mapped.candidates.map((row) => ({
+          id: row._id,
+          addId: row._id,
+          name: row.name ?? '',
+          type: row.type == null ? null : Number(row.type)
+        }));
+      } else {
+        summary.reason = unusableCategoryReason(category, id);
+      }
+      unusable.push(summary);
     }
     return { categories, unusable };
   }

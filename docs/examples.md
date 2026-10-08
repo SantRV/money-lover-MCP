@@ -273,7 +273,7 @@ Tool call: add_transaction({
 Response:  { "_id": "webXXX...", "amount": 50000, "note": "Lunch", "displayDate": "2026-04-18" }
 ```
 
-> **Category id:** Pass `id` or `addId` from `list_categories` for this wallet. That is the `/category/list-all` id, paired with `walletId`. `includeUnusable: true` lists stored categories the picker does not offer. A name that matches a parent and a sub-category returns both ids and writes nothing.
+> **Category id:** Pass `id` or `addId` from `list_categories` for this wallet. That is the `/category/list-all` id, paired with `walletId`. `includeUnusable: true` lists stored categories that do not map to one picker row. On this account those rows are `not_in_list_all` (the capture has no delete or hidden flag on them). A stored name that matches two picker rows is `ambiguous` and includes the candidate add ids. A name that matches a parent and a sub-category returns both ids and writes nothing.
 
 ### `edit_transaction`
 

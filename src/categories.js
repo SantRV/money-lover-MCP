@@ -147,10 +147,13 @@ export const findCategoryForWallet = (rows, walletId, id) =>
 
 /**
  * Why a /category/list row is absent from the add picker.
- * The website's Add Transaction picker is POST /category/list-all filtered by
- * account === wallet. The bundle also drops IS_UNCATEGORIZED_* from that response.
- * It does not consult an isDelete flag on categories (that flag is on wallets).
- * A stored row is unusable when no list-all row for this wallet matches it.
+ * The website loads POST /category/list-all, drops IS_UNCATEGORIZED_*, and
+ * keeps account === wallet. The expense tab then hides IS_LOAN and
+ * IS_REPAYMENT; those rows stay usable on the debt tab.
+ * The 8 Oct 2026 capture has no isDelete, hidden, or archived field on
+ * category rows, and group is 0 wherever it is set. A stored row in that
+ * capture is unusable because list-all has no row for this wallet. deleted
+ * and hidden apply when a payload sets those fields.
  */
 export const unusableCategoryReason = (category, walletId) => {
   const account = accountOf(category);
